@@ -7,9 +7,12 @@ import re
 from typing import Tuple, List, Dict
 
 try:
-    from indic_nlp.normalize import indic_normalize
+    # Correcting 'indic_nlp' to 'indicnlp'
+    from indicnlp.normalize import indic_normalize
+    from indicnlp.tokenize import sentence_tokenize
 except ImportError:
     indic_normalize = None
+    sentence_tokenize = None
 
 from langdetect import detect, detect_langs, LangDetectException
 import nltk
@@ -43,7 +46,15 @@ class HindiPreprocessor:
             remove_diacritics: Whether to remove Hindi diacritical marks (matras)
         """
         self.remove_diacritics = remove_diacritics
-        self.normalizer = indic_normalize.IndicNormalize(lang="hi") if indic_normalize else None
+        if indic_normalize:
+            try:
+                factory = indic_normalize.IndicNormalizerFactory()
+                self.normalizer = factory.get_normalizer("hi")
+            except Exception as e:
+                logger.warning(f"Failed to initialize normalizer: {e}")
+                self.normalizer = None
+        else:
+            self.normalizer = None
         self.tokenizer = HindiWordTokenizer(lang="hi")
 
         # Hindi Unicode ranges
@@ -350,24 +361,3 @@ def preprocess_pipeline(
 
     return segments, metadata
 
-
-if __name__ == "__main__":
-    # Test preprocessing
-    test_text = """
-    यह एक परीक्षण पाठ है। मुझे यह वाक्य बहुत पसंद है और मैं इसे और आगे लिखना चाहता हूं।
-    यह एक दूसरा पैराग्राफ है जो भावनाओं के बारे में है।
-    """
-
-    preprocessor = HindiPreprocessor()
-    cleaned = preprocessor.clean_text(test_text)
-    normalized = preprocessor.normalize_text(cleaned)
-    tokens = preprocessor.tokenize(normalized)
-
-    print("Original:", test_text)
-    print("Cleaned:", cleaned)
-    print("Normalized:", normalized)
-    print("Tokens:", tokens)
-
-    segments, metadata = preprocess_pipeline(test_text)
-    print("\nSegments:", segments)
-    print("Metadata:", metadata)

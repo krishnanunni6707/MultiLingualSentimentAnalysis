@@ -15,12 +15,14 @@ backend_path = Path(__file__).resolve().parent
 if str(backend_path) not in sys.path:
     sys.path.insert(0, str(backend_path))
 
-from config import APIConfig, LOG_DIR
-from inference.pipeline import RealTimeInference
+from config import LOG_DIR
 from utils.logger import setup_logger
 
 # Configure logging to go to file only to avoid polluting console output
-setup_logger(level=logging.WARNING, log_file=str(LOG_DIR / "cli.log"))
+setup_logger(level=logging.WARNING, log_file=str(LOG_DIR / "cli.log"), force=True)
+
+from config import APIConfig
+from inference.pipeline import RealTimeInference
 logger = logging.getLogger(__name__)
 
 # ANSI Escape Sequences for terminal coloring
@@ -210,6 +212,7 @@ def main():
 
     # Load model
     print(color_text("[~] Loading models and pipeline (this may take 15-30 seconds)...", Colors.YELLOW, color_enabled))
+    logger.warning("Initializing RealTimeInference pipeline...")
     try:
         inference = RealTimeInference(model_path=APIConfig.MODEL_PATH)
         device_name = str(inference.pipeline.device)

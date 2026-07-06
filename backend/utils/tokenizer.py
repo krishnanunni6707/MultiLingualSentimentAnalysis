@@ -14,7 +14,8 @@ import logging
 from typing import List
 
 try:
-    from indic_nlp.tokenize import indic_tokenize
+    # Correcting 'indic_nlp' to 'indicnlp'
+    from indicnlp.tokenize import indic_tokenize
 except ImportError:
     logging.warning("indic-nlp-library not installed. Install with: pip install indic-nlp-library")
     indic_tokenize = None

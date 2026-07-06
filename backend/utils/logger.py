@@ -20,15 +20,17 @@ def setup_logger(
     level: int = logging.INFO,
     log_file: Optional[str] = None,
     fmt: str = DEFAULT_FORMAT,
+    force: bool = False,
 ) -> logging.Logger:
     """
     Configure the root logger with a console handler (and optionally a
-    file handler). Safe to call multiple times — only configures once.
+    file handler). Safe to call multiple times — only configures once unless forced.
 
     Args:
         level: Logging level for the root logger
         log_file: Optional path to also write logs to a file
         fmt: Log message format string
+        force: If True, clears existing handlers and reconfigures logging
 
     Returns:
         The configured root logging.Logger
@@ -37,8 +39,13 @@ def setup_logger(
 
     root = logging.getLogger()
 
-    if _ROOT_CONFIGURED:
+    if _ROOT_CONFIGURED and not force:
         return root
+
+    if force:
+        # Clear existing handlers to prevent duplicates
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
 
     root.setLevel(level)
     formatter = logging.Formatter(fmt)
