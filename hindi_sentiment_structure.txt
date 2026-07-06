@@ -1,0 +1,41 @@
+hindi-sentiment-analysis/
+├── backend/
+│   ├── requirements.txt
+│   ├── config.py
+│   ├── main.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── preprocessing.py
+│   │   ├── tokenizer.py
+│   │   └── logger.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── sentiment_model.py
+│   │   └── model_utils.py
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── dataset.py
+│   │   ├── dataloader.py
+│   │   └── raw/
+│   │       ├── emotion_hindi/
+│   │       └── sentiment_corpora/
+│   ├── training/
+│   │   ├── __init__.py
+│   │   ├── trainer.py
+│   │   ├── losses.py
+│   │   └── metrics.py
+│   ├── inference/
+│   │   ├── __init__.py
+│   │   ├── segmentation.py
+│   │   ├── pipeline.py
+│   │   └── output_assembler.py
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── routes.py
+│   │   ├── schemas.py
+│   │   └── middleware.py
+│   ├── checkpoints/
+│   │   └── best_model.pt
+│   └── logs/
+│       └── training.log
+
