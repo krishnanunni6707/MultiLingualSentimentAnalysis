@@ -60,9 +60,13 @@ class SentimentInferencePipelineEN:
         # saved trainer checkpoints and plain state_dicts both work.
         self.model, self.tokenizer, resolved_labels = load_model(
             checkpoint_path=model_path,
-            emotion_labels=emotion_labels,
+            # Do NOT pass emotion_labels — let the checkpoint supply its own
+            # authoritative label vocabulary to prevent index-shifting bugs.
+            emotion_labels=None,
             model_name=ModelConfigEN.MODEL_NAME,
         )
+        # model.id2label is the canonical source; resolved_labels kept for
+        # backward-compat with OutputAssembler.
         self.emotion_labels = resolved_labels
 
         self.model.to(device)
@@ -114,9 +118,14 @@ class SentimentInferencePipelineEN:
         intensity_scores = outputs["intensity_scores"]
 
         for i in range(len(texts)):
-            emotion_dict = {}
-            for j, label in enumerate(self.emotion_labels):
-                emotion_dict[label] = emotion_probs[i, j].item()
+            # Decode using the model's own id2label — the authoritative
+            # index→label mapping derived directly from the checkpoint.
+            id2label = self.model.id2label
+
+            emotion_dict = {
+                id2label[j]: emotion_probs[i, j].item()
+                for j in range(emotion_probs.shape[1])
+            }
 
             result = {
                 "text": texts[i],

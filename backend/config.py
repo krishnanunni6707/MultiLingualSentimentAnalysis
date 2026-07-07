@@ -45,7 +45,7 @@ class ModelConfigEN(ModelConfig):
     MODEL_NAME = "bert-base-uncased"
 
 class TrainingConfig:
-    BATCH_SIZE = 16
+    BATCH_SIZE = 1
     GRADIENT_ACCUMULATION_STEPS = 2
     LEARNING_RATE = 2e-5
     WEIGHT_DECAY = 0.01

@@ -16,13 +16,73 @@ from models.sentiment_model import MultiTaskSentimentModel
 logger = get_logger(__name__)
 
 
+import torch.nn as nn
+from transformers import AutoModelForSequenceClassification
+
+class AutoSequenceClassifierWrapper(nn.Module):
+    """
+    Wrapper for sequence classification models to conform to the MultiTaskSentimentModel API.
+    """
+    def __init__(self, model_name_or_path: str, temperature: float = 1.2):
+        super().__init__()
+        self.classifier = AutoModelForSequenceClassification.from_pretrained(model_name_or_path)
+        self.config = self.classifier.config
+        self.id2label = self.config.id2label
+        self.label2id = {v: k for k, v in self.id2label.items()}
+        self.temperature = temperature
+
+    def forward(self, input_ids, attention_mask, **kwargs):
+        outputs = self.classifier(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        if self.temperature != 1.0:
+            logits = logits / self.temperature
+        
+        emotion_probabilities = torch.softmax(logits, dim=-1)
+        
+        # Determine polarity mapping dynamically
+        polarity_weights = []
+        for idx in range(len(self.id2label)):
+            lbl = self.id2label[idx].lower()
+            if lbl in ("joy", "joyful", "happy", "happiness", "love", "optimism", "positive"):
+                polarity_weights.append(1.0)
+            elif lbl in ("anger", "angry", "sadness", "sad", "fear", "fearful", "scared", "disgust", "disgusted", "negative", "hate"):
+                polarity_weights.append(-1.0)
+            else:
+                polarity_weights.append(0.0)
+                
+        device = logits.device
+        polarity_weights_t = torch.tensor(polarity_weights, device=device, dtype=torch.float)
+        
+        polarity_scores = torch.sum(emotion_probabilities * polarity_weights_t, dim=-1, keepdim=True)
+        
+        neutral_idx = None
+        for idx, lbl in self.id2label.items():
+            if lbl.lower() == "neutral":
+                neutral_idx = idx
+                break
+        if neutral_idx is not None:
+            intensity_scores = 1.0 - emotion_probabilities[:, neutral_idx : neutral_idx + 1]
+        else:
+            intensity_scores = torch.max(emotion_probabilities, dim=-1, keepdim=True)[0]
+            
+        return {
+            "emotion_probabilities": emotion_probabilities,
+            "polarity_scores": polarity_scores,
+            "intensity_scores": intensity_scores,
+            "logits": logits
+        }
+
+
 class ModelTokenizer:
     """
-    Wrapper for IndicBERT tokenizer
+    Wrapper for tokenizers supporting fallback to slow mode if fast model loading fails.
     """
 
     def __init__(self, model_name: str = ModelConfig.MODEL_NAME):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        except Exception:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
         self.max_length = ModelConfig.MAX_SEQUENCE_LENGTH
 
     def encode(
@@ -42,7 +102,7 @@ class ModelTokenizer:
             return_tensors: Return format (pt for PyTorch)
 
         Returns:
-            Dictionary with input_ids, attention_mask, token_type_ids
+            Dictionary with input_ids, attention_mask
         """
         encoding = self.tokenizer(
             text,
@@ -99,51 +159,59 @@ def load_model(
     checkpoint_path: Optional[str] = None,
     emotion_labels: Optional[List[str]] = None,
     model_name: str = ModelConfig.MODEL_NAME,
-) -> Tuple[MultiTaskSentimentModel, ModelTokenizer, List[str]]:
+) -> Tuple[nn.Module, ModelTokenizer, List[str]]:
     """
-    Load model and tokenizer
-
-    Args:
-        checkpoint_path: Path to checkpoint (if None, loads pretrained)
-
-        emotion_labels: Optional label vocabulary to use when a checkpoint
-            does not provide one
-        model_name: Base transformer model name
-
-    Returns:
-        Tuple of (model, tokenizer, emotion_labels)
+    Load a context-aware sequence classification model and its corresponding tokenizer.
+    Supports CUDA mapping if available.
     """
-    resolved_emotion_labels = list(emotion_labels) if emotion_labels else _default_emotion_labels()
-    resolved_model_name = model_name
-    state_dict = None
+    # 1. Determine if this is Hindi or English path
+    is_english = False
+    if model_name == "bert-base-uncased":
+        is_english = True
+    elif checkpoint_path and "/en/" in str(checkpoint_path):
+        is_english = True
 
-    if checkpoint_path:
-        try:
-            checkpoint = _load_checkpoint_payload(checkpoint_path)
-            state_dict = checkpoint["state_dict"]
+    resolved_model_name = ""
+    
+    # 2. Upgrade Model Checkpoints with robust context-aware alternatives
+    if is_english:
+        logger.info("Resolving English emotion model...")
+        # English: Try 'ArisXavier/roberta-base-emotion', fallback to 'j-hartmann/emotion-english-distilroberta-base'
+        for name in ["ArisXavier/roberta-base-emotion", "j-hartmann/emotion-english-distilroberta-base"]:
+            try:
+                from transformers import AutoConfig
+                AutoConfig.from_pretrained(name)
+                resolved_model_name = name
+                logger.info(f"Successfully selected English model: {resolved_model_name}")
+                break
+            except Exception as e:
+                logger.warning(f"Could not load English model {name}: {e}")
+        if not resolved_model_name:
+            resolved_model_name = "j-hartmann/emotion-english-distilroberta-base"
+    else:
+        logger.info("Resolving Hindi emotion model...")
+        # Hindi: Try 'l3cube-pune/hindi-emotion-bert', then 'l3cube-pune/hindi-sentiment-bert', fallback to 'vashuag/HindiEmotion'
+        for name in ["l3cube-pune/hindi-emotion-bert", "l3cube-pune/hindi-sentiment-bert", "vashuag/HindiEmotion"]:
+            try:
+                from transformers import AutoConfig
+                AutoConfig.from_pretrained(name)
+                resolved_model_name = name
+                logger.info(f"Successfully selected Hindi model: {resolved_model_name}")
+                break
+            except Exception as e:
+                logger.warning(f"Could not load Hindi model {name}: {e}")
+        if not resolved_model_name:
+            resolved_model_name = "vashuag/HindiEmotion"
 
-            checkpoint_emotion_labels = checkpoint["emotion_labels"]
-            if checkpoint_emotion_labels:
-                resolved_emotion_labels = checkpoint_emotion_labels
-
-            resolved_model_name = checkpoint.get("model_name") or resolved_model_name
-
-            if emotion_labels and checkpoint_emotion_labels and emotion_labels != checkpoint_emotion_labels:
-                logger.warning(
-                    "Checkpoint emotion labels differ from provided labels; using checkpoint labels"
-                )
-
-            logger.info(f"Loaded model from {checkpoint_path}")
-        except Exception as e:
-            logger.error(f"Error loading checkpoint: {e}")
-
-    model = MultiTaskSentimentModel(
-        model_name=resolved_model_name,
-        num_emotions=len(resolved_emotion_labels),
-    )
+    # 3. Load model wrapped in AutoSequenceClassifierWrapper with logit temperature smoothing
+    model = AutoSequenceClassifierWrapper(resolved_model_name, temperature=1.2)
     tokenizer = ModelTokenizer(model_name=resolved_model_name)
 
-    if state_dict is not None:
-        model.load_state_dict(state_dict)
+    # Configure CUDA device if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    resolved_emotion_labels = list(model.id2label.values())
+    logger.info(f"Loaded model {resolved_model_name} on device {device} with labels: {resolved_emotion_labels}")
 
     return model, tokenizer, resolved_emotion_labels

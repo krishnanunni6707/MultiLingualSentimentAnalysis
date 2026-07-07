@@ -7,6 +7,60 @@ sentiment analysis pipeline.
 
 from typing import Any, Dict, List
 
+# ---------------------------------------------------------------------------
+# Valence grouping — maps every Ekman emotion to a broad sentiment polarity.
+# Two branches that agree on valence but differ on fine-grained label are
+# still considered to be in agreement.
+#
+# NOTE: 'surprise' is mapped to 'neutral' because surprise is polarity-
+# ambivalent — it can be wonder/delight (positive) or shock/alarm (negative).
+# Mapping it to 'positive' caused systematic mismatches when the English
+# GoEmotions model defaults to 'surprise' on uncertain/translated inputs.
+# ---------------------------------------------------------------------------
+_VALENCE_MAP: Dict[str, str] = {
+    # Canonical Ekman labels
+    "joy":      "positive",
+    "surprise": "neutral",    # ambivalent — not reliably positive or negative
+    "anger":    "negative",
+    "sadness":  "negative",
+    "fear":     "negative",
+    "disgust":  "negative",
+    # Inflected / checkpoint-specific variants (e.g. EmoInHindi uses "disgusted")
+    "disgusted":  "negative",
+    "angry":      "negative",
+    "sad":        "negative",
+    "fearful":    "negative",
+    "scared":     "negative",
+    "joyful":     "positive",
+    "happy":      "positive",
+    "surprised":  "neutral",
+}
+_POLARITY_PROXIMITY_THRESHOLD: float = 0.20
+# Wider threshold used when the secondary branch has low confidence.
+_POLARITY_PROXIMITY_THRESHOLD_LAX: float = 0.35
+# Below this confidence the secondary branch is considered uncertain.
+_LOW_CONFIDENCE_GATE: float = 0.50
+
+
+def _valence(label: str) -> str:
+    """Return the broad valence group for a given emotion label.
+
+    Performs a direct lookup first, then strips common English morphological
+    suffixes (``-ed``, ``-ful``, ``-ness``, ``-ity``) before a second lookup,
+    so checkpoint-specific inflected forms (e.g. ``"disgusted"``) are handled
+    even when not listed explicitly in ``_VALENCE_MAP``.
+    """
+    key = label.lower()
+    if key in _VALENCE_MAP:
+        return _VALENCE_MAP[key]
+    # Suffix-strip fallback
+    for suffix in ("ned", "ed", "ful", "ness", "ity", "ing"):
+        if key.endswith(suffix):
+            base = key[: -len(suffix)]
+            if base in _VALENCE_MAP:
+                return _VALENCE_MAP[base]
+    return "neutral"
+
 
 class ResultComparator:
     """Reconcile Hindi-direct and English-translated sentiment results."""
@@ -29,10 +83,55 @@ class ResultComparator:
         english_result: Dict[str, Any],
         language: str = "hi",
     ) -> Dict[str, Any]:
-        """Return a single merged result with a cross-check payload."""
-        hindi_label = hindi_result["dominant_emotion"]
+        """Return a single merged result with a cross-check payload.
+
+        Agreement is evaluated via three independent criteria; passing *any*
+        one is sufficient to mark the segment as agreed:
+
+        1. **Exact match** — both branches predict the same emotion label.
+        2. **Valence match** — both labels map to the same broad valence group
+           (positive / negative / neutral), so ``fear`` vs ``sadness`` still
+           counts as agreement.
+        3. **Polarity proximity** — the absolute difference between the two
+           branches' polarity scores is within
+           ``_POLARITY_PROXIMITY_THRESHOLD`` (default ±0.2).
+        """
+        hindi_label   = hindi_result["dominant_emotion"]
         english_label = english_result["dominant_emotion"]
-        agreement = hindi_label == english_label
+
+        exact_match   = hindi_label == english_label
+        valence_match = _valence(hindi_label) == _valence(english_label)
+
+        polarity_diff = abs(
+            hindi_result["polarity_score"] - english_result["polarity_score"]
+        )
+
+        # If the secondary (cross-check) branch has low confidence we apply a
+        # more lenient polarity threshold — an uncertain model should not
+        # definitively veto a high-confidence primary prediction.
+        if language == "en":
+            secondary_confidence = hindi_result["confidence"]
+        else:
+            secondary_confidence = english_result["confidence"]
+
+        proximity_threshold = (
+            _POLARITY_PROXIMITY_THRESHOLD_LAX
+            if secondary_confidence < _LOW_CONFIDENCE_GATE
+            else _POLARITY_PROXIMITY_THRESHOLD
+        )
+        polarity_proximate = polarity_diff <= proximity_threshold
+
+        agreement = exact_match or valence_match or polarity_proximate
+
+        agreement_detail = {
+            "exact_label_match":       exact_match,
+            "valence_match":           valence_match,
+            "polarity_diff":           round(polarity_diff, 4),
+            "polarity_proximate":      polarity_proximate,
+            "polarity_threshold_used": round(proximity_threshold, 2),
+            "secondary_confidence":    round(secondary_confidence, 4),
+            "low_confidence_gate":     _LOW_CONFIDENCE_GATE,
+        }
 
         if self.strategy == "confidence_weighted_pick":
             primary = hindi_result if hindi_result["confidence"] >= english_result["confidence"] else english_result
@@ -60,17 +159,18 @@ class ResultComparator:
                 primary_source = "hindi_direct"
 
         return {
-            "emotions": primary["emotions"],
+            "emotions":         primary["emotions"],
             "dominant_emotion": primary["dominant_emotion"],
-            "polarity_score": primary["polarity_score"],
-            "intensity": primary["intensity"],
-            "confidence": primary["confidence"],
+            "polarity_score":   primary["polarity_score"],
+            "intensity":        primary["intensity"],
+            "confidence":       primary["confidence"],
             "cross_check": {
-                "hindi_direct": self._minimal_result(hindi_result),
+                "hindi_direct":      self._minimal_result(hindi_result),
                 "english_translated": self._minimal_result(english_result),
-                "agreement": agreement,
-                "strategy_used": self.strategy,
-                "primary_source": primary_source,
+                "agreement":         agreement,
+                "agreement_detail":  agreement_detail,
+                "strategy_used":     self.strategy,
+                "primary_source":    primary_source,
             },
         }
 

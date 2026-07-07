@@ -187,10 +187,14 @@ def main():
         description="Sentiment CLI: Dual-Path Sentiment Analysis on Hindi and English Text."
     )
     parser.add_argument(
+        "input_file", nargs="?", default=None,
+        help="Path to a .txt file to analyze (positional shortcut, e.g. python main.py doc.txt)."
+    )
+    parser.add_argument(
         "--text", "-t", type=str, help="Text to analyze directly from the command line."
     )
     parser.add_argument(
-        "--file", "-f", type=str, help="Path to a text file to read and analyze."
+        "--file", "-f", type=str, help="Path to a .txt file to read and analyze."
     )
     parser.add_argument(
         "--language", "-l", choices=["hi", "en"], help="Explicitly specify language code (hi=Hindi, en=English)."
@@ -207,6 +211,13 @@ def main():
 
     args = parser.parse_args()
     color_enabled = not args.no_color
+
+    # Positional .txt file takes precedence over --file flag
+    if args.input_file:
+        if not args.input_file.endswith(".txt"):
+            print(color_text(f"[!] Positional argument must be a .txt file, got: {args.input_file}", Colors.RED, color_enabled))
+            sys.exit(1)
+        args.file = args.input_file
 
     print_banner(color_enabled)
 

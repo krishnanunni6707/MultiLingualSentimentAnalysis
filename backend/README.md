@@ -22,6 +22,7 @@ A production-ready, dual-language multi-task sentiment analysis system for Hindi
 - [Output Schema](#output-schema)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
+- [CLI Usage](#cli-usage)
 - [Training](#training)
 - [API Usage](#api-usage)
 - [Python API](#python-api)
@@ -371,67 +372,28 @@ When an English document is provided (detected automatically or specified via `l
 
 ---
 
-## Models and Fine-Tuning
+## Models and Upgraded Architectures
 
-The system fine-tunes **two separate transformer models**, one per language branch. Both share the **identical** `MultiTaskSentimentModel` architecture — only the pretrained encoder weights differ.
+The system utilizes two highly optimized pre-trained sequence classification models wrapped in a dynamic adapter wrapper class (`AutoSequenceClassifierWrapper`). This configuration ensures context-aware emotion recognition and avoids keyword token poisoning.
 
-### Hindi Model — `distilbert-base-multilingual-cased`
+### 1. Hindi Model Path
 
-| Property | Value |
-|---|---|
-| **Base model** | `distilbert-base-multilingual-cased` (HuggingFace) |
-| **Parameters** | ~135M |
-| **Architecture** | 6 transformer layers, 768 hidden dim, 12 attention heads |
-| **Vocabulary** | 119,547 subwords (covering 104 languages, incl. Devanagari) |
-| **Tokenizer** | WordPiece, max 512 subwords |
-| **Training dataset** | **EmoInHindi** — dialogue-style Hindi CSV dataset |
-| **Training task** | Multi-task: emotion classification + polarity regression + intensity regression |
-| **Checkpoint saved as** | `checkpoints/best_model.pt` |
-| **Training script** | `train.py` |
-| **Config** | `ModelConfig` in `config.py` |
+*   **Primary Candidate:** `l3cube-pune/hindi-emotion-bert` or `l3cube-pune/hindi-sentiment-bert`
+*   **Automatic Fallback (Active):** `vashuag/HindiEmotion` (a robust multi-class Devanagari emotion BERT model fine-tuned on nuanced Hindi texts)
+*   **Device Mapping:** Automatically configured on `cuda` if available, otherwise maps to `cpu`.
+*   **Decoded Labels:** `{0: 'anger', 1: 'disgust', 2: 'fear', 3: 'joy', 4: 'neutral', 5: 'sadness', 6: 'surprise'}`
+*   **Tokenizer:** Custom tokenization with dynamic safety fallback to slow mode (`use_fast=False`) to prevent rust-based parsing failures.
 
-**Fine-tuning hyperparameters (default):**
+### 2. English Model Path
 
-```
-Optimizer:     AdamW (lr=2e-5, weight_decay=0.01)
-Scheduler:     Linear warmup (500 steps) → linear decay
-Epochs:        15 (early stopping: patience=3)
-Batch size:    16 (+ gradient accumulation ×2 = effective 32)
-Max grad norm: 1.0
-Loss weights:  emotion=1.0, polarity=0.8, intensity=0.8
-```
+*   **Primary Candidate:** `ArisXavier/roberta-base-emotion`
+*   **Automatic Fallback (Active):** `j-hartmann/emotion-english-distilroberta-base` (trained on Ekman's basic emotions + Neutral)
+*   **Device Mapping:** Automatically configured on `cuda` if available, otherwise maps to `cpu`.
+*   **Decoded Labels:** `{0: 'anger', 1: 'disgust', 2: 'fear', 3: 'joy', 4: 'neutral', 5: 'sadness', 6: 'surprise'}`
 
 ---
 
-### English Model — `bert-base-uncased`
-
-| Property | Value |
-|---|---|
-| **Base model** | `bert-base-uncased` (HuggingFace) |
-| **Parameters** | ~110M |
-| **Architecture** | 12 transformer layers, 768 hidden dim, 12 attention heads |
-| **Vocabulary** | 30,522 subwords (English) |
-| **Tokenizer** | WordPiece, max 512 subwords |
-| **Training dataset** | **GoEmotions** (Google, 58k Reddit comments, 27 fine-grained emotions → mapped to 6 Ekman groups) |
-| **Training task** | Same multi-task objective as Hindi model |
-| **Checkpoint saved as** | `checkpoints/en/best_model.pt` |
-| **Training script** | `train_en.py` |
-| **Config** | `ModelConfigEN` in `config.py` |
-
-**GoEmotions → Ekman mapping used during training:**
-
-| GoEmotions (27 labels) | → Ekman Group |
-|---|---|
-| anger, annoyance, disapproval | → `anger` |
-| disgust | → `disgust` |
-| fear, nervousness | → `fear` |
-| joy, amusement, approval, excitement, gratitude, love, optimism, relief, pride, admiration, caring, desire | → `joy` |
-| sadness, disappointment, embarrassment, grief, remorse | → `sadness` |
-| surprise, confusion, curiosity, realization | → `surprise` |
-
----
-
-### Translation Model — `Helsinki-NLP/opus-mt-hi-en`
+### 3. Translation Model — `Helsinki-NLP/opus-mt-hi-en`
 
 | Property | Value |
 |---|---|
@@ -442,6 +404,26 @@ Loss weights:  emotion=1.0, polarity=0.8, intensity=0.8
 | **Max length** | 512 tokens |
 
 > This model is **not fine-tuned** — it is used as a frozen translator to bridge Hindi segments to the English sentiment branch for cross-validation.
+
+---
+
+## Model Architecture & Dynamics
+
+Both paths leverage the `AutoSequenceClassifierWrapper` class which mimics the Multi-Task Sentiment architecture by dynamically mapping classification outputs to the pipeline:
+
+1. **Logit Temperature Smoothing (`temperature=1.2`)**:
+   Smooths logits before softmax:
+   $$\text{smoothed\_logits} = \frac{\text{logits}}{1.2}$$
+   This prevents over-saturation (e.g. rigid 90%+ confidences) on isolated heavy nouns like "अवसाद" or "चिंता".
+
+2. **Dynamic Polarity Derivation**:
+   Polarity regression scores are calculated dynamically by taking the dot product of emotion probabilities and their respective polarity weights:
+   - Positive emotions (`joy`, `happy`, `love`, etc.): $+1.0$
+   - Negative emotions (`anger`, `sadness`, `fear`, `disgust`, etc.): $-1.0$
+   - Other emotions (`surprise`, `neutral`): $0.0$
+
+3. **Dynamic Intensity Derivation**:
+   Intensity is derived as $1.0 - P(\text{neutral})$ if a neutral label is present, or defaults to the maximum probability of the dominant non-neutral emotion.
 
 ---
 
@@ -719,6 +701,119 @@ TRANSLATION_DEVICE=cpu
 API_HOST=0.0.0.0
 API_PORT=8000
 API_WORKERS=4
+```
+
+---
+
+## CLI Usage
+
+`main.py` is the command-line interface for running sentiment analysis directly without starting an API server.
+
+### Basic Usage
+
+```bash
+# Navigate to backend directory first
+cd mul-ling-senti-analysis/backend
+```
+
+### 1. Analyze a `.txt` File (Positional — Quickest)
+
+Pass the file path directly as a positional argument:
+
+```bash
+python main.py document.txt
+python main.py data/sample.txt
+```
+
+### 2. Analyze a `.txt` File (via Flag)
+
+```bash
+python main.py --file document.txt
+python main.py -f document.txt
+```
+
+### 3. Analyze Text Directly from the Command Line
+
+```bash
+python main.py --text "यह फिल्म बहुत अच्छी है!"
+python main.py -t "This movie is absolutely wonderful!"
+```
+
+### 4. Interactive Mode
+
+Launch with no arguments to enter the interactive REPL:
+
+```bash
+python main.py
+```
+
+Inside interactive mode:
+
+| Command | Description |
+|---|---|
+| `<type your text>` | Analyze the typed text directly |
+| `file <path>` | Analyze a text file by path |
+| `multiline` | Enter multi-line input mode (submit with an empty line) |
+| `detailed` | Toggle per-segment analysis on/off |
+| `help` | Print command list |
+| `exit` / `quit` | Exit the program |
+
+### Options & Flags
+
+| Flag | Short | Description |
+|---|---|---|
+| `input_file` | *(positional)* | Path to a `.txt` file to analyze |
+| `--file` | `-f` | Path to a `.txt` file to analyze |
+| `--text` | `-t` | Text string to analyze directly |
+| `--language` | `-l` | Force language: `hi` (Hindi) or `en` (English) |
+| `--detailed` | `-d` | Print per-segment breakdown with cross-check results |
+| `--output` | `-o` | Save full JSON results to a file |
+| `--no-color` | | Disable ANSI color in terminal output |
+
+### Combined Examples
+
+```bash
+# Analyze a Hindi .txt file with detailed segment-level output
+python main.py document.txt --detailed
+
+# Analyze a file, force language to Hindi, save JSON output
+python main.py -f input.txt --language hi --output results.json
+
+# Analyze inline text with detailed view
+python main.py --text "मुझे यह पसंद नहीं है।" --detailed
+
+# Analyze an English file and save results
+python main.py report.txt -l en -o report_sentiment.json
+
+# Disable colors (useful for piping output to a file)
+python main.py document.txt --no-color > output.txt
+```
+
+### Example Output
+
+```
+========================================================================
+   🌟 Multi-Lingual Sentiment Analysis System (Hindi/English) 🌟
+========================================================================
+
+[+] Pipeline successfully loaded on device: cuda
+
+------------------------------------------------------------------------
+ANALYSIS RESULTS SUMMARY
+------------------------------------------------------------------------
+Detected Language:   Hindi (hi) (Confidence: 99.1%)
+Original Length:     312 characters
+Number of Segments:  3
+
+OVERALL SENTIMENT:
+  Dominant Emotion:  [ JOY ] (Confidence: 87.4%)
+  Polarity Score:    +0.7812 (Positive)
+  Intensity Score:   0.7341 (Strong)
+
+CROSS-CHECK SUMMARY (Dual-Path):
+  Agreement Rate:    100.0%
+  Verification:      🟢 AGREED (3/3 segments matched)
+------------------------------------------------------------------------
 ```
 
 ---

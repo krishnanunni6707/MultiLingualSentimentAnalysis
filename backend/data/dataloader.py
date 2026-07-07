@@ -12,7 +12,7 @@ from config import TrainingConfig
 from models.model_utils import ModelTokenizer
 from data.dataset import HindiSentimentCSVDataset
 
-DEFAULT_DATA_FILE = "data/EmoInHindi/LREC_EmoInHindi.csv"
+DEFAULT_DATA_FILE = "data/EmoInHindi/LREC_EmoInHindi_reduced.csv"
 
 
 class CollateFunction:

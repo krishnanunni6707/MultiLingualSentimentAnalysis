@@ -245,7 +245,7 @@ class Segmentation:
             sentences = nltk.sent_tokenize(text)
         except Exception:
             # Fallback: split by common Hindi sentence terminators
-            sentences = re.split(r'।|।।|\.|!|\?', text)
+            sentences = re.split(r'[।.!?]+', text)
             sentences = [s.strip() for s in sentences if s.strip()]
 
         return sentences
@@ -306,57 +306,232 @@ class Segmentation:
 
         return segments
 
+    @staticmethod
+    def segment_hierarchical(
+        raw_text: str,
+        preprocessor: "HindiPreprocessor",
+        max_length: int = 512,
+    ) -> List[str]:
+        """
+        Hierarchical segmenter that preserves paragraph structure.
+
+        Strategy (in order):
+        1. Split *raw* text on double newlines (``\\n\\n``) BEFORE cleaning,
+           so structural paragraph boundaries are not erased by whitespace
+           normalization.
+        2. Clean + normalize each paragraph individually.
+        3. If a cleaned paragraph is within *max_length* characters, keep it
+           as a single segment.
+        4. If it exceeds *max_length*, sub-split by sentence boundaries
+           (``।``, ``.``, ``!``, ``?``) and greedily pack sentences into
+           chunks without crossing the limit.
+        5. If a single sentence still exceeds *max_length*, word-chunk it.
+
+        Args:
+            raw_text:    Original (uncleaned) document text.
+            preprocessor: A ``HindiPreprocessor`` instance used for cleaning
+                          and normalisation.
+            max_length:  Maximum character length per output segment.
+
+        Returns:
+            List of cleaned, length-bounded text segments.
+        """
+        # Step 1 — paragraph split on RAW text before any cleaning
+        raw_paragraphs = re.split(r'\n\n+', raw_text)
+
+        segments: List[str] = []
+
+        for raw_para in raw_paragraphs:
+            raw_para = raw_para.strip()
+            if not raw_para:
+                continue
+
+            # Step 2 — clean + normalize this paragraph in isolation
+            cleaned = preprocessor.clean_text(raw_para)
+            cleaned = preprocessor.normalize_text(cleaned)
+            cleaned = cleaned.strip()
+
+            if not cleaned:
+                continue
+
+            # Step 3 — short enough → keep as one segment
+            if len(cleaned) <= max_length:
+                segments.append(cleaned)
+                continue
+
+            # Step 4 — sub-split by sentence boundaries
+            sentences = re.split(r'(?<=[।.!?])\s+', cleaned)
+            sentences = [s.strip() for s in sentences if s.strip()]
+
+            current_chunk = ""
+            for sentence in sentences:
+                candidate = (current_chunk + " " + sentence).strip() if current_chunk else sentence
+                if len(candidate) <= max_length:
+                    current_chunk = candidate
+                else:
+                    if current_chunk:
+                        segments.append(current_chunk)
+                    # Step 5 — single sentence too long → word-chunk it
+                    if len(sentence) > max_length:
+                        words = sentence.split()
+                        word_chunk = ""
+                        for word in words:
+                            trial = (word_chunk + " " + word).strip() if word_chunk else word
+                            if len(trial) <= max_length:
+                                word_chunk = trial
+                            else:
+                                if word_chunk:
+                                    segments.append(word_chunk)
+                                word_chunk = word
+                        if word_chunk:
+                            segments.append(word_chunk)
+                        current_chunk = ""
+                    else:
+                        current_chunk = sentence
+
+            if current_chunk:
+                segments.append(current_chunk)
+
+        return segments
+
+
+# ---------------------------------------------------------------------------
+# Pivot-conjunction polarity adjuster
+# ---------------------------------------------------------------------------
+
+# Hindi transitional conjunctions that signal a sentiment inversion or
+# contrast ("however", "but", "therefore", "nevertheless", etc.).
+_PIVOT_CONJUNCTIONS: List[str] = [
+    'लेकिन', 'परंतु', 'अतः', 'फिर भी', 'बल्कि', 'किंतु',
+    'तथापि', 'मगर', 'पर ', 'हालाँकि', 'हालांकि',
+]
+
+# How much to attenuate (pull toward 0) the polarity when a pivot is found.
+# 0.35 means a score of +0.8 becomes +0.52 and −0.9 becomes −0.585.
+_PIVOT_WEIGHT: float = 0.35
+
+
+class PolarityPivotAdjuster:
+    """
+    Post-inference polarity correction for segments containing pivot
+    conjunctions (e.g. 'परंतु', 'लेकिन') that structurally invert or
+    moderate the sentiment expressed before them.
+
+    Usage::
+
+        result = PolarityPivotAdjuster.adjust(result, segment_text)
+    """
+
+    @staticmethod
+    def contains_pivot(text: str) -> bool:
+        """Return True if *text* contains any known pivot conjunction."""
+        return any(pivot in text for pivot in _PIVOT_CONJUNCTIONS)
+
+    @staticmethod
+    def adjust(result: Dict, text: str, pivot_weight: float = _PIVOT_WEIGHT) -> Dict:
+        """
+        Attenuate ``polarity_score`` toward zero when a pivot conjunction
+        is present, signalling a mixed-valence context.
+
+        Args:
+            result:       Inference result dict with a ``polarity_score`` key.
+            text:         The original segment text (used for pivot detection).
+            pivot_weight: Attenuation factor in [0, 1].  Default 0.35.
+
+        Returns:
+            A shallow copy of *result* with an adjusted ``polarity_score``
+            and an added ``pivot_adjusted`` boolean flag.
+        """
+        result = dict(result)  # shallow copy — do not mutate caller's dict
+        if PolarityPivotAdjuster.contains_pivot(text):
+            old = result.get("polarity_score", 0.0)
+            result["polarity_score"] = float(old * (1.0 - pivot_weight))
+            result["pivot_adjusted"] = True
+        else:
+            result["pivot_adjusted"] = False
+        return result
+
 
 def preprocess_pipeline(
     text: str,
     max_length: int = 512,
     remove_stopwords: bool = False,
-    segment_strategy: str = "sentence"
+    segment_strategy: str = "sentence",
 ) -> Tuple[List[str], Dict]:
     """
-    Complete preprocessing pipeline combining all utilities
+    Complete preprocessing pipeline combining all utilities.
+
+    The default strategy (``"sentence"``) now uses the hierarchical segmenter
+    which splits on ``\\n\\n`` paragraph boundaries *before* cleaning so that
+    structural whitespace is preserved.  Subsequent long paragraphs are
+    sub-split by sentence, then by word-boundary if needed.
 
     Args:
-        text: Raw input text
-        max_length: Maximum segment length
-        remove_stopwords: Whether to remove stopwords
-        segment_strategy: How to segment (sentence, paragraph, fixed_length)
+        text:             Raw input text.
+        max_length:       Maximum segment character length.
+        remove_stopwords: Whether to remove Hindi stopwords.
+        segment_strategy: ``"sentence"`` (default / hierarchical),
+                          ``"paragraph"``, or ``"fixed_length"``.
 
     Returns:
-        Tuple of (segments, metadata)
+        Tuple of (segments, metadata).
     """
     if not text or not isinstance(text, str):
         return [], {"error": "Invalid input text"}
 
-    # Language detection
+    # Language detection runs on raw text before any cleaning
     lang, lang_confidence = LanguageDetector.detect_language(text)
 
-    # Preprocessing
     preprocessor = HindiPreprocessor()
-    cleaned_text = preprocessor.clean_text(text)
-    normalized_text = preprocessor.normalize_text(cleaned_text)
 
-    # Segmentation
-    if segment_strategy == "sentence":
-        segments = Segmentation.segment_by_sentences(normalized_text)
+    # ---------------------------------------------------------------------------
+    # Segmentation — choose strategy
+    # ---------------------------------------------------------------------------
+    if segment_strategy in ("sentence", "hierarchical"):
+        # Hierarchical: paragraph-first split on RAW text, then sub-split long
+        # paragraphs by sentence.  This is the default and handles \n\n inputs.
+        segments = Segmentation.segment_hierarchical(
+            raw_text=text,
+            preprocessor=preprocessor,
+            max_length=max_length,
+        )
     elif segment_strategy == "paragraph":
+        # Legacy paragraph split: clean first, then split on \n\n.
+        # NOTE: cleaning removes newlines, so this only works if the caller
+        # preserved newlines. Prefer the hierarchical strategy instead.
+        cleaned_text = preprocessor.clean_text(text)
+        normalized_text = preprocessor.normalize_text(cleaned_text)
         segments = Segmentation.segment_by_paragraphs(normalized_text)
     elif segment_strategy == "fixed_length":
+        cleaned_text = preprocessor.clean_text(text)
+        normalized_text = preprocessor.normalize_text(cleaned_text)
         segment_dicts = Segmentation.segment_by_length(normalized_text, max_length)
         segments = [seg["text"] for seg in segment_dicts]
     else:
-        segments = [normalized_text]
+        cleaned_text = preprocessor.clean_text(text)
+        segments = [preprocessor.normalize_text(cleaned_text)]
 
-    # Filter short segments
+    # Optionally strip stopwords from each segment
+    if remove_stopwords:
+        processed = []
+        for seg in segments:
+            tokens = preprocessor.tokenize(seg)
+            tokens = preprocessor.remove_stopwords(tokens, keep_stopwords=False)
+            processed.append(' '.join(tokens))
+        segments = processed
+
+    # Filter out very short fragments
     segments = [s for s in segments if len(s) > DataConfig.MIN_TEXT_LENGTH]
 
+    # Build metadata from a representative cleaned version for length tracking
+    representative_clean = preprocessor.clean_text(text)
     metadata = {
         "language": lang,
         "language_confidence": lang_confidence,
         "original_length": len(text),
-        "cleaned_length": len(cleaned_text),
+        "cleaned_length": len(representative_clean),
         "num_segments": len(segments),
-        "segment_strategy": segment_strategy
+        "segment_strategy": segment_strategy,
     }
 
     return segments, metadata

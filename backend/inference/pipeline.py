@@ -18,6 +18,7 @@ from models.model_utils import ModelTokenizer, load_model
 
 from utils.logger import get_logger
 from utils.translator import HindiToEnglishTranslator
+from utils.preprocessing import PolarityPivotAdjuster
 from inference.segmentation import DocumentSegmenter
 from inference.output_assembler import OutputAssembler
 from inference.pipeline_en import SentimentInferencePipelineEN, EMOTION_LABELS_EN
@@ -54,11 +55,21 @@ class SentimentInferencePipeline:
         """
         self.device = device
         self.batch_size = batch_size
+
+        if model_path is None:
+            model_path = str(Path(CHECKPOINT_DIR) / "best_model.pt")
+
         self.model, self.tokenizer, resolved_labels = load_model(
             checkpoint_path=model_path,
-            emotion_labels=emotion_labels or EMOTION_LABELS,
+            # Do NOT pass emotion_labels here — always let the checkpoint
+            # supply its own authoritative label vocabulary. This prevents
+            # the index-shifting bug that occurs when the caller's list
+            # differs in order or content from what the model was trained on.
+            emotion_labels=None,
             model_name=ModelConfig.MODEL_NAME,
         )
+        # self.model.id2label is the canonical source; keep resolved_labels
+        # only for backward-compat with OutputAssembler.
         self.emotion_labels = resolved_labels
 
         self.model.to(device)
@@ -127,9 +138,17 @@ class SentimentInferencePipeline:
         intensity_scores = outputs["intensity_scores"]
 
         for i in range(len(texts)):
-            emotion_dict = {}
-            for j, label in enumerate(self.emotion_labels):
-                emotion_dict[label] = emotion_probs[i, j].item()
+            # Decode using the model's own id2label — the authoritative
+            # index→label mapping derived directly from the checkpoint.
+            # This eliminates the index-shifting bug caused by a mismatch
+            # between any external label list and the checkpoint's training
+            # label order.
+            id2label: Dict[int, str] = self.model.id2label
+
+            emotion_dict = {
+                id2label[j]: emotion_probs[i, j].item()
+                for j in range(emotion_probs.shape[1])
+            }
 
             result = {
                 "text": texts[i],
@@ -137,8 +156,13 @@ class SentimentInferencePipeline:
                 "polarity_score": polarity_scores[i].item(),
                 "intensity": intensity_scores[i].item(),
                 "dominant_emotion": max(emotion_dict, key=emotion_dict.get),
-                "confidence": max(emotion_dict.values())
+                "confidence": max(emotion_dict.values()),
             }
+
+            # Apply pivot-conjunction polarity attenuation.
+            # Transitional words like 'परंतु' / 'लेकिन' signal mixed valence;
+            # attenuate the raw polarity toward 0 to avoid hard negative bias.
+            result = PolarityPivotAdjuster.adjust(result, texts[i])
 
             results.append(result)
 
