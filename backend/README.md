@@ -433,10 +433,10 @@ Both Hindi and English fine-tuned models use the identical task-head design:
 
 ```
 Input: CLS pooled representation [batch, 768]
-          │
-    ┌─────┼────────────────────┐
-    │     │                    │
-    ▼     ▼                    ▼
+                           │
+    ┌──────────────────────|────────────────────┐
+    │                      │                    │
+    ▼                      ▼                    ▼
 EmotionHead          PolarityHead         IntensityHead
   Linear(768→64)      Linear(768→16)       Linear(768→16)
   ReLU + Dropout      ReLU + Dropout       ReLU + Dropout
