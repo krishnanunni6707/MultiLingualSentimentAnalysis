@@ -1,0 +1,59 @@
+                           INPUT
+                             │
+                             ▼
+              Input Text + Emotion Metadata(JSON)
+                             │
+         ┌───────────────────┴────────────────────┐
+         │                                        │
+         ▼                                        ▼
+  Text Processing Branch                  Feature Processing Branch
+         │                                        │
+ SentencePiece Tokenizer                Numeric Emotion Features
+ (32k Shared Vocabulary)                + Categorical Features
+         │                              + Segment Emotion Features
+         ▼                                        │
+ FastText Initialized Embedding                  ▼
+ (32000 × 256)                        Feature Encoder Network
+         │                              ├─ Numeric Encoder
+ + Positional Encoding                  ├─ Categorical Encoder
+ + Dropout                              ├─ Segment Encoder
+         │                              └─ Self-Attention
+         ▼                                        │
+  Shared Embedding Layer                        ▼
+         │                              Global Emotion Vector
+         ▼                              + Segment Features
+  Transformer Encoder                           │
+ (4 Layers, Pre-LN)                             │
+         │                                      │
+         └──────────────┬───────────────────────┘
+                        ▼
+          Emotion-Aware Fusion Module
+        ┌─────────────────────────────────────┐
+        │ Cross-Attention                     │
+        │ Query = Encoder Output              │
+        │ Key/Value = Segment Features        │
+        │                                     │
+        │ Residual + LayerNorm                │
+        │                                     │
+        │ FiLM Modulation                     │
+        │ (γ, β from Global Emotion Vector)   │
+        └─────────────────────────────────────┘
+                        │
+                        ▼
+            Emotion-Aware Encoder Output
+                        │
+                        ▼
+         Transformer Decoder (4 Layers)
+     • Masked Self Attention
+     • Cross Attention to Encoder Output
+     • Feed Forward Network
+                        │
+                        ▼
+        Weight-Tied Output Projection
+             (Embedding Matrix Shared)
+                        │
+                        ▼
+               Generated Summary Tokens
+                        │
+                        ▼
+                 Final Summary Output
