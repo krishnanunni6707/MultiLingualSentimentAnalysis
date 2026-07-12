@@ -23,7 +23,7 @@ class AutoSequenceClassifierWrapper(nn.Module):
     """
     Wrapper for sequence classification models to conform to the MultiTaskSentimentModel API.
     """
-    def __init__(self, model_name_or_path: str, temperature: float = 1.2):
+    def __init__(self, model_name_or_path: str, temperature: float = 1.0):
         super().__init__()
         self.classifier = AutoModelForSequenceClassification.from_pretrained(model_name_or_path)
         self.config = self.classifier.config
@@ -43,9 +43,10 @@ class AutoSequenceClassifierWrapper(nn.Module):
         polarity_weights = []
         for idx in range(len(self.id2label)):
             lbl = self.id2label[idx].lower()
-            if lbl in ("joy", "joyful", "happy", "happiness", "love", "optimism", "positive"):
+            #=======Update the emotions according to the trained ones...
+            if lbl in ("joy", "joyful", "happy", "happiness", "love", "optimism", "positive", "hopeful", "confident", "grateful", "compassion", "impressed"):
                 polarity_weights.append(1.0)
-            elif lbl in ("anger", "angry", "sadness", "sad", "fear", "fearful", "scared", "disgust", "disgusted", "negative", "hate"):
+            elif lbl in ("anger", "angry", "annoyed", "sadness", "sad", "fear", "fearful", "scared", "disgust", "disgusted", "negative", "hate", "guilty", "apprehensive"):
                 polarity_weights.append(-1.0)
             else:
                 polarity_weights.append(0.0)
@@ -54,6 +55,11 @@ class AutoSequenceClassifierWrapper(nn.Module):
         polarity_weights_t = torch.tensor(polarity_weights, device=device, dtype=torch.float)
         
         polarity_scores = torch.sum(emotion_probabilities * polarity_weights_t, dim=-1, keepdim=True)
+        
+        # Ambiguity Gate: If max class confidence is low (< 0.45), pull polarity 70% closer to 0.0 (neutral)
+        max_conf = torch.max(emotion_probabilities, dim=-1, keepdim=True)[0]
+        is_ambiguous = (max_conf < 0.45).float()
+        polarity_scores = (1.0 - is_ambiguous) * polarity_scores + is_ambiguous * (polarity_scores * 0.3)
         
         neutral_idx = None
         for idx, lbl in self.id2label.items():
@@ -164,6 +170,31 @@ def load_model(
     Load a context-aware sequence classification model and its corresponding tokenizer.
     Supports CUDA mapping if available.
     """
+    import os
+    if checkpoint_path and os.path.isfile(checkpoint_path):
+        logger.info(f"Loading custom model from checkpoint: {checkpoint_path}")
+        payload = _load_checkpoint_payload(checkpoint_path)
+        
+        payload_model_name = payload.get("model_name", model_name)
+        labels = payload.get("emotion_labels") or emotion_labels
+        if not labels:
+            labels = list(ModelConfig.DEFAULT_EMOTION_LABELS)
+            
+        model = MultiTaskSentimentModel(payload_model_name, num_emotions=len(labels))
+        model.load_state_dict(payload["state_dict"])
+        
+        # Attach id2label and label2id mappings for pipeline compatibility
+        model.id2label = {i: label for i, label in enumerate(labels)}
+        model.label2id = {label: i for i, label in enumerate(labels)}
+        
+        tokenizer = ModelTokenizer(model_name=payload_model_name)
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        
+        logger.info(f"Loaded custom model {payload_model_name} from checkpoint on device {device} with labels: {labels}")
+        return model, tokenizer, labels
+
     # 1. Determine if this is Hindi or English path
     is_english = False
     if model_name == "bert-base-uncased":
@@ -176,8 +207,8 @@ def load_model(
     # 2. Upgrade Model Checkpoints with robust context-aware alternatives
     if is_english:
         logger.info("Resolving English emotion model...")
-        # English: Try 'ArisXavier/roberta-base-emotion', fallback to 'j-hartmann/emotion-english-distilroberta-base'
-        for name in ["ArisXavier/roberta-base-emotion", "j-hartmann/emotion-english-distilroberta-base"]:
+        # English: Try 'j-hartmann/emotion-english-distilroberta-base'
+        for name in ["j-hartmann/emotion-english-distilroberta-base"]:
             try:
                 from transformers import AutoConfig
                 AutoConfig.from_pretrained(name)
@@ -190,8 +221,8 @@ def load_model(
             resolved_model_name = "j-hartmann/emotion-english-distilroberta-base"
     else:
         logger.info("Resolving Hindi emotion model...")
-        # Hindi: Try 'l3cube-pune/hindi-emotion-bert', then 'l3cube-pune/hindi-sentiment-bert', fallback to 'vashuag/HindiEmotion'
-        for name in ["l3cube-pune/hindi-emotion-bert", "l3cube-pune/hindi-sentiment-bert", "vashuag/HindiEmotion"]:
+        # Hindi: Try 'vashuag/HindiEmotion'
+        for name in ["vashuag/HindiEmotion"]:
             try:
                 from transformers import AutoConfig
                 AutoConfig.from_pretrained(name)
@@ -204,6 +235,7 @@ def load_model(
             resolved_model_name = "vashuag/HindiEmotion"
 
     # 3. Load model wrapped in AutoSequenceClassifierWrapper with logit temperature smoothing
+    logger.info("Loading weights...")
     model = AutoSequenceClassifierWrapper(resolved_model_name, temperature=1.2)
     tokenizer = ModelTokenizer(model_name=resolved_model_name)
 

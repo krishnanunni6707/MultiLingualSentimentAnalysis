@@ -57,3 +57,56 @@
                         │
                         ▼
                  Final Summary Output
+
+
+//////////////////////////////////////////////////////////////////////////////////
+
+File Structure
+
+    ├── summarizer/                          ← NEW MODULE
+│   │   ├── __init__.py
+│   │   ├── config.py
+│   │   │
+│   │   ├── tokenizer/
+│   │   │   ├── __init__.py
+│   │   │   ├── train_spm.py
+│   │   │   ├── fasttext_init.py
+│   │   │   ├── vocab.model
+│   │   │   └── vocab.vocab
+│   │   │
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── embeddings.py              ← fastText init + positional enc
+│   │   │   ├── encoder.py                 ← 4-layer pre-LN transformer enc
+│   │   │   ├── feature_encoder.py         ← numeric + categorical + segment
+│   │   │   ├── fusion.py                  ← cross-attention + FiLM
+│   │   │   ├── decoder.py                 ← 4-layer masked transformer dec
+│   │   │   ├── auxiliary_heads.py         ← emotion clf + polarity reg
+│   │   │   └── summarizer.py              ← top-level model, forward()
+│   │   │
+│   │   ├── data/
+│   │   │   ├── __init__.py
+│   │   │   ├── dataset.py                 ← (text, JSON) → token pairs
+│   │   │   ├── collator.py                ← padding + batch assembly
+│   │   │   ├── raw/
+│   │   │   └── processed/
+│   │   │
+│   │   ├── training/
+│   │   │   ├── __init__.py
+│   │   │   ├── trainer.py                 ← fp16, grad accum, Adam8bit
+│   │   │   ├── losses.py                  ← L_sum + L_emo + L_pol
+│   │   │   ├── metrics.py                 ← ROUGE, BERTScore, emotion acc
+│   │   │   └── curriculum.py              ← stage A → stage B switching
+│   │   │
+│   │   ├── inference/
+│   │   │   ├── __init__.py
+│   │   │   ├── generate.py                ← beam search / greedy decode
+│   │   │   └── pipeline.py                ← wires sentiment JSON → summary
+│   │   │
+│   │   ├── checkpoints/
+│   │   │   ├── stage_a_pretrain.pt
+│   │   │   └── stage_b_best.pt
+│   │   │
+│   │   └── logs/
+│   │       ├── stage_a.log
+│   │       └── stage_b.log

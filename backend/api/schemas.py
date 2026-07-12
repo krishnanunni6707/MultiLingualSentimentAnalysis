@@ -148,8 +148,16 @@ class DocumentSentimentResponse(BaseModel):
 	"""
 
 	overall_sentiment: OverallSentiment
-	metadata: DocumentMetadata
-	segments: Optional[List[SegmentResult]] = None
+	metadata:          DocumentMetadata
+	segments:          Optional[List[SegmentResult]] = None
+	summary: Optional[str] = Field(
+		default=None,
+		description="Generated abstractive sentiment-aware summary of the document",
+	)
+	summarizer_status: str = Field(
+		default="not_trained",
+		description="One of: active | not_trained | disabled",
+	)
 
 
 # ---------------------------------------------------------------------------

@@ -411,11 +411,22 @@ _PIVOT_CONJUNCTIONS: List[str] = [
 _PIVOT_WEIGHT: float = 0.35
 
 
+# Hindi keywords that signal a hopeful/resilient resolution after a pivot.
+_HOPE_KEYWORDS: List[str] = [
+    'सूरज', 'किरण', 'सुबह', 'उगने', 'उदय', 'बदलाव', 'संभव', 'शुरुआत',
+    'आविष्कार', 'विचार', 'महान', 'खूबसूरत', 'उठने', 'दोबारा', 'रोशनी',
+    'उम्मीद', 'हौसला', 'प्रेरणा', 'हिम्मत', 'साहस',
+]
+
+
 class PolarityPivotAdjuster:
     """
     Post-inference polarity correction for segments containing pivot
     conjunctions (e.g. 'परंतु', 'लेकिन') that structurally invert or
     moderate the sentiment expressed before them.
+
+    When the post-pivot clause contains hope/resilience keywords the
+    polarity is *flipped* toward positive rather than merely attenuated.
 
     Usage::
 
@@ -428,27 +439,51 @@ class PolarityPivotAdjuster:
         return any(pivot in text for pivot in _PIVOT_CONJUNCTIONS)
 
     @staticmethod
+    def contains_hope(text: str) -> bool:
+        """Return True if *text* contains any known hope/resilience keyword."""
+        return any(kw in text for kw in _HOPE_KEYWORDS)
+
+    @staticmethod
     def adjust(result: Dict, text: str, pivot_weight: float = _PIVOT_WEIGHT) -> Dict:
         """
-        Attenuate ``polarity_score`` toward zero when a pivot conjunction
-        is present, signalling a mixed-valence context.
+        Adjust ``polarity_score`` based on pivot conjunctions and hope keywords.
+
+        Three cases:
+        1. **Pivot + Hope keywords** → flip polarity toward positive.
+        2. **Pivot only** → attenuate polarity toward zero (mixed-valence).
+        3. **No pivot** → pass through unchanged.
 
         Args:
             result:       Inference result dict with a ``polarity_score`` key.
-            text:         The original segment text (used for pivot detection).
+            text:         The original segment text.
             pivot_weight: Attenuation factor in [0, 1].  Default 0.35.
 
         Returns:
             A shallow copy of *result* with an adjusted ``polarity_score``
-            and an added ``pivot_adjusted`` boolean flag.
+            and ``pivot_adjusted`` / ``hope_flipped`` boolean flags.
         """
         result = dict(result)  # shallow copy — do not mutate caller's dict
-        if PolarityPivotAdjuster.contains_pivot(text):
+        has_pivot = PolarityPivotAdjuster.contains_pivot(text)
+        has_hope  = PolarityPivotAdjuster.contains_hope(text)
+
+        if has_pivot and has_hope:
+            # The sentence contrasts a negative setup with a hopeful resolution.
+            # Flip the polarity toward positive.
+            old = result.get("polarity_score", 0.0)
+            if old < 0:
+                result["polarity_score"] = float(abs(old) * 0.8)
+            else:
+                result["polarity_score"] = float(min(1.0, old * 1.2))
+            result["pivot_adjusted"] = True
+            result["hope_flipped"]  = True
+        elif has_pivot:
             old = result.get("polarity_score", 0.0)
             result["polarity_score"] = float(old * (1.0 - pivot_weight))
             result["pivot_adjusted"] = True
+            result["hope_flipped"]  = False
         else:
             result["pivot_adjusted"] = False
+            result["hope_flipped"]  = False
         return result
 
 

@@ -74,3 +74,8 @@ See **[`backend/README.md`](backend/README.md)** for:
 - API endpoint reference
 - Configuration reference
 - Troubleshooting guide
+
+
+If cuda cache full do this : nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -I {} kill -9 {}
+
+to clear the __Pycache__ : find . -type d -name "__pycache__" -exec rm -rf {} +

@@ -26,12 +26,19 @@ logger = get_logger(__name__)
 # by data.dataset_en.GOEMOTIONS_TO_EKMAN, so the model architecture is
 # identical to the Hindi model — only the pretrained encoder differs
 # (see config.ModelConfigEN).
-EMOTION_LABELS_EN = ["anger", "joy", "sadness", "fear", "surprise", "disgust"]
+EMOTION_LABELS_EN = [
+    "admiration", "amusement", "anger", "annoyance", "approval", "caring", 
+    "confusion", "curiosity", "desire", "disappointment", "disapproval", 
+    "disgust", "embarrassment", "excitement", "fear", "gratitude", "grief", 
+    "joy", "love", "nervousness", "optimism", "pride", "realization", 
+    "relief", "remorse", "sadness", "surprise"
+]
 
 
 class SentimentInferencePipelineEN:
     """
-    Complete inference pipeline for English sentiment analysis.
+    Complete inference pipeline for English sentiment analysis (lazy-loaded).
+    Model loads on first inference call to save memory.
     """
 
     def __init__(
@@ -42,7 +49,7 @@ class SentimentInferencePipelineEN:
         emotion_labels: List[str] = EMOTION_LABELS_EN,
     ):
         """
-        Initialize inference pipeline
+        Initialize inference pipeline (lazy-loads model on first use)
 
         Args:
             model_path: Path to model checkpoint (trained via
@@ -56,25 +63,42 @@ class SentimentInferencePipelineEN:
         self.batch_size = batch_size
         self.emotion_labels = emotion_labels
 
-        # Load model and tokenizer using the shared checkpoint loader so
-        # saved trainer checkpoints and plain state_dicts both work.
-        self.model, self.tokenizer, resolved_labels = load_model(
-            checkpoint_path=model_path,
-            # Do NOT pass emotion_labels — let the checkpoint supply its own
-            # authoritative label vocabulary to prevent index-shifting bugs.
-            emotion_labels=None,
-            model_name=ModelConfigEN.MODEL_NAME,
-        )
-        # model.id2label is the canonical source; resolved_labels kept for
-        # backward-compat with OutputAssembler.
-        self.emotion_labels = resolved_labels
-
-        self.model.to(device)
-        self.model.eval()
+        # Lazy load: store config, don't load model yet 
+        self.model = None
+        self.tokenizer = None
+        self._loaded = False
+        self._model_path = model_path
+        self._device = device
 
         # Segmentation + output assembly
         self.segmenter = DocumentSegmenter(language="en")
         self.output_assembler = OutputAssembler(emotion_labels=self.emotion_labels)
+
+    def _ensure_loaded(self):
+        """Load model and tokenizer on first use (lazy loading)."""
+        if self._loaded:
+            return  # Already loaded, skip
+        
+        logger.info(f"[Lazy Load] Loading English sentiment model..")
+        print(f"[~] Loading English sentiment model...")
+        
+        try:
+            # Load model and tokenizer using the shared checkpoint loader
+            self.model, self.tokenizer, resolved_labels = load_model(
+                checkpoint_path=self._model_path,
+                emotion_labels=None,
+                model_name=ModelConfigEN.MODEL_NAME,
+            )
+            # model.id2label is the canonical source
+            self.emotion_labels = resolved_labels
+            
+            self.model.to(self._device)
+            self.model.eval()
+            self._loaded = True
+            logger.info(f"English sentiment model loaded on {self._device}")
+        except Exception as e:
+            logger.error(f"Failed to load English model: {str(e)}")
+            raise
 
     def preprocess_text(self, text: str) -> Tuple[List[str], Dict]:
         """
@@ -98,6 +122,8 @@ class SentimentInferencePipelineEN:
         Returns:
             List of predictions for each segment
         """
+        self._ensure_loaded()  # Load on first call
+        
         results = []
 
         # Tokenize all texts

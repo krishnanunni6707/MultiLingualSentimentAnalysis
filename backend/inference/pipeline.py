@@ -24,9 +24,55 @@ from inference.output_assembler import OutputAssembler
 from inference.pipeline_en import SentimentInferencePipelineEN, EMOTION_LABELS_EN
 from inference.comparator import ResultComparator
 
+from multilingual_summarizer.summarizer import BilingualSummarizer
+
 logger = get_logger(__name__)
 
 EMOTION_LABELS = list(ModelConfig.DEFAULT_EMOTION_LABELS)
+
+
+def adapt_sentiment_output_to_summarizer(sentiment_json: dict) -> dict:
+    """
+    Transforms the nested sentiment JSON output format of the main pipeline
+    into the flat dictionary format expected by the summarizer model features.
+    """
+    overall = sentiment_json.get("overall_sentiment", {})
+    emotions = overall.get("emotions", {})
+    cross_check = overall.get("cross_check_summary", {}) or {}
+    
+    polarity_desc = str(overall.get("polarity_description", "neutral")).lower()
+    intensity_desc = str(overall.get("intensity_description", "weak")).lower()
+    dominant_emo = str(overall.get("dominant_emotion", "unknown")).lower()
+    
+    adapted = {
+        "anger": float(emotions.get("anger", 0.0)),
+        "joy": float(emotions.get("joy", 0.0)),
+        "sadness": float(emotions.get("sadness", 0.0)),
+        "fear": float(emotions.get("fear", 0.0)),
+        "surprise": float(emotions.get("surprise", 0.0)),
+        "disgust": float(emotions.get("disgust", 0.0)),
+        
+        "polarity_score": float(overall.get("polarity_score", 0.0)),
+        "intensity": float(overall.get("intensity", 0.0)),
+        "confidence": float(overall.get("confidence", 0.0)),
+        "agreement_rate": float(cross_check.get("agreement_rate", 0.0)),
+        
+        "dominant_emotion": dominant_emo,
+        "polarity_description": polarity_desc,
+        "intensity_description": intensity_desc,
+        
+        "segments": []
+    }
+    
+    for seg in sentiment_json.get("segments", []):
+        seg_sentiment = seg.get("sentiment", {})
+        adapted["segments"].append({
+            "polarity_score": float(seg_sentiment.get("polarity_score", 0.0)),
+            "intensity": float(seg_sentiment.get("intensity", 0.0)),
+            "confidence": float(seg_sentiment.get("confidence", 0.0))
+        })
+        
+    return adapted
 
 
 class SentimentInferencePipeline:
@@ -59,6 +105,7 @@ class SentimentInferencePipeline:
         if model_path is None:
             model_path = str(Path(CHECKPOINT_DIR) / "best_model.pt")
 
+        logger.info("Direct-Hindi Sentiment Analysis Model Loading..")
         self.model, self.tokenizer, resolved_labels = load_model(
             checkpoint_path=model_path,
             # Do NOT pass emotion_labels here — always let the checkpoint
@@ -95,6 +142,21 @@ class SentimentInferencePipeline:
             emotion_labels=EMOTION_LABELS_EN,
         )
         self.comparator = ResultComparator(strategy=comparison_strategy)
+
+        # ---------------------------------------------------------------------------
+        # Emotion-Aware Summarizer — Bilingual summarization model that takes the sentiment
+        # JSON output and produces a concise summary of the document's emotional content.
+        # ---------------------------------------------------------------------------
+        self.summarizer_pipeline = None
+        self.summarizer_status   = "active"   # Assuming initialization succeeded
+
+        try:
+            self.summarizer_pipeline = BilingualSummarizer()
+            logger.info("BilingualSummarizer Initialized success fully")
+        except Exception as e:
+            logger.error("Summarizer initialization failed : %s",e)
+            self.summarizer_status = "disabled"          
+
 
     def preprocess_text(self, text: str) -> Tuple[List[str], Dict]:
         """
@@ -138,11 +200,6 @@ class SentimentInferencePipeline:
         intensity_scores = outputs["intensity_scores"]
 
         for i in range(len(texts)):
-            # Decode using the model's own id2label — the authoritative
-            # index→label mapping derived directly from the checkpoint.
-            # This eliminates the index-shifting bug caused by a mismatch
-            # between any external label list and the checkpoint's training
-            # label order.
             id2label: Dict[int, str] = self.model.id2label
 
             emotion_dict = {
@@ -150,19 +207,74 @@ class SentimentInferencePipeline:
                 for j in range(emotion_probs.shape[1])
             }
 
+            # 1. Grab raw model outputs
+            raw_polarity = polarity_scores[i].item()
+            dominant_emo = max(emotion_dict, key=emotion_dict.get)
+            max_confidence = max(emotion_dict.values())
+
+            # 2. Contextual Resolution: Force positive swing if hope/optimism/resilience is present in a complex context
+            hope_score = emotion_dict.get("hopeful", 0.0)
+            joy_score = emotion_dict.get("joy", 0.0) or emotion_dict.get("joyful", 0.0)
+            confident_score = emotion_dict.get("confident", 0.0)
+            grateful_score = emotion_dict.get("grateful", 0.0)
+            compassion_score = emotion_dict.get("compassion", 0.0)
+            impressed_score = emotion_dict.get("impressed", 0.0)
+            
+            # Combine positive energies (exclude surprise — it's polarity-ambiguous)
+            positive_energy = max(hope_score, joy_score, confident_score, grateful_score, compassion_score, impressed_score)
+            
+            # Threshold adjusted for multi-class vocab size (17 emotions vs 7 emotions)
+            num_classes = len(emotion_dict)
+            uniform_prob = 1.0 / max(num_classes, 1)
+            
+            # Check for pivot conjunctions AND hopeful keywords in text
+            has_pivot = any(pivot in texts[i] for pivot in ['लेकिन', 'परंतु', 'फिर भी', 'बल्कि', 'किंतु', 'मगर', 'हालांकि', 'हालाँकि'])
+            has_hope_keywords = any(kw in texts[i] for kw in ['सूरज', 'किरण', 'सुबह', 'उगने', 'उदय', 'बदलाव', 'संभव', 'शुरुआत', 'आविष्कार', 'विचार', 'उठने', 'दोबारा', 'रोशनी', 'उम्मीद', 'हौसला', 'प्रेरणा', 'महान', 'खूबसूरत'])
+            
+            # CRITICAL: require BOTH pivot AND hope keywords for structural flip,
+            # OR a strong model-level positive signal on its own (>0.15 for 17-class)
+            structural_hope = has_pivot and has_hope_keywords
+            strong_model_positive = positive_energy > max(0.15, 2.5 * uniform_prob)
+            
+            should_flip = (structural_hope or strong_model_positive) and dominant_emo in ["sadness", "sad", "anger", "angry", "disgust", "disgusted", "fear", "apprehensive", "annoyed", "guilty"]
+            
+            if should_flip:
+                # Flip/balance the polarity to positive
+                raw_polarity = max(raw_polarity, positive_energy * 3.0)
+                raw_polarity = min(1.0, max(0.1, raw_polarity))
+                
+                # Determine which positive/resolving emotion to promote
+                pos_emotions = {
+                    "hopeful": hope_score,
+                    "joy": joy_score,
+                    "confident": confident_score,
+                    "grateful": grateful_score,
+                    "compassion": compassion_score,
+                    "impressed": impressed_score,
+                }
+                best_pos_emo = max(pos_emotions, key=pos_emotions.get)
+                
+                # Only relabel if the positive emotion has meaningful probability
+                if pos_emotions[best_pos_emo] > uniform_prob:
+                    dominant_emo = best_pos_emo
+                    max_confidence = pos_emotions[best_pos_emo]
+
             result = {
                 "text": texts[i],
                 "emotions": emotion_dict,
-                "polarity_score": polarity_scores[i].item(),
+                "polarity_score": raw_polarity,
                 "intensity": intensity_scores[i].item(),
-                "dominant_emotion": max(emotion_dict, key=emotion_dict.get),
-                "confidence": max(emotion_dict.values()),
+                "dominant_emotion": dominant_emo,
+                "confidence": max_confidence,
             }
 
-            # Apply pivot-conjunction polarity attenuation.
-            # Transitional words like 'परंतु' / 'लेकिन' signal mixed valence;
-            # attenuate the raw polarity toward 0 to avoid hard negative bias.
+            # 3. Apply the system pivot adjuster safely
             result = PolarityPivotAdjuster.adjust(result, texts[i])
+            
+            # 4. Final Safety Lock: If our custom logic triggered a hopeful resolution,
+            # ensure the pivot adjuster didn't drag it back into absolute negative territory
+            if should_flip and result["polarity_score"] < 0:
+                result["polarity_score"] = max(0.1, positive_energy * 2.0)
 
             results.append(result)
 
@@ -251,27 +363,49 @@ class SentimentInferencePipeline:
 
         cross_check_summary = self.comparator.summarize(segment_results)
 
+        # Build the full output document
+        full_result = self.output_assembler.format_full_output(
+            segments=segments,
+            segment_results=segment_results,
+            metadata=metadata,
+            segment_id=segment_id,
+            lang=lang,
+            lang_confidence=lang_confidence,
+            translation_used=translate,
+            cross_check_summary=cross_check_summary,
+        )
+
+        # Run the summarizer — only when a fully trained checkpoint is loaded.
+        # When not trained, carry the status through so callers can surface a
+        # clean message without needing to inspect the pipeline directly.
+        summary = None
+        if self.summarizer_pipeline is not None:
+            try:
+                adapted_json = adapt_sentiment_output_to_summarizer(full_result)
+                logger.info("Sending to summarizer: %s", adapted_json)
+                summary_data = self.summarizer_pipeline.summarize(
+                    text = text,
+                    language = lang,
+                    sentiment_data=adapted_json
+                )
+                summary = summary_data.get("summary")
+            except Exception as e:
+                logger.error("Error during summarization : %s",e)
+
+        full_result["summary"]           = summary
+        full_result["summarizer_status"] = self.summarizer_status
+
         if return_segments:
-            # Return the complete unified output document.
-            return self.output_assembler.format_full_output(
-                segments=segments,
-                segment_results=segment_results,
-                metadata=metadata,
-                segment_id=segment_id,
-                lang=lang,
-                lang_confidence=lang_confidence,
-                translation_used=translate,
-                cross_check_summary=cross_check_summary,
-            )
+            return full_result
 
-        # Without segments: return aggregate + metadata only.
-        aggregated = self.output_assembler.aggregate_results(segment_results)
-        aggregated["cross_check_summary"] = cross_check_summary
-
+        # Without segments: return aggregate + metadata + summary only.
         return {
-            "overall_sentiment": aggregated,
-            "metadata": metadata,
+            "overall_sentiment": full_result["overall_sentiment"],
+            "metadata":          full_result["metadata"],
+            "summary":           full_result["summary"],
+            "summarizer_status": full_result["summarizer_status"],
         }
+
 
     def process_json_output(
         self,

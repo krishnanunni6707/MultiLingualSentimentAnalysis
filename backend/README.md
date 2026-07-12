@@ -378,16 +378,14 @@ The system utilizes two highly optimized pre-trained sequence classification mod
 
 ### 1. Hindi Model Path
 
-*   **Primary Candidate:** `l3cube-pune/hindi-emotion-bert` or `l3cube-pune/hindi-sentiment-bert`
-*   **Automatic Fallback (Active):** `vashuag/HindiEmotion` (a robust multi-class Devanagari emotion BERT model fine-tuned on nuanced Hindi texts)
+*   **Active Model:** `vashuag/HindiEmotion` (a robust multi-class Devanagari emotion BERT model fine-tuned on nuanced Hindi texts)
 *   **Device Mapping:** Automatically configured on `cuda` if available, otherwise maps to `cpu`.
 *   **Decoded Labels:** `{0: 'anger', 1: 'disgust', 2: 'fear', 3: 'joy', 4: 'neutral', 5: 'sadness', 6: 'surprise'}`
 *   **Tokenizer:** Custom tokenization with dynamic safety fallback to slow mode (`use_fast=False`) to prevent rust-based parsing failures.
 
 ### 2. English Model Path
 
-*   **Primary Candidate:** `ArisXavier/roberta-base-emotion`
-*   **Automatic Fallback (Active):** `j-hartmann/emotion-english-distilroberta-base` (trained on Ekman's basic emotions + Neutral)
+*   **Active Model:** `j-hartmann/emotion-english-distilroberta-base` (trained on Ekman's basic emotions + Neutral)
 *   **Device Mapping:** Automatically configured on `cuda` if available, otherwise maps to `cpu`.
 *   **Decoded Labels:** `{0: 'anger', 1: 'disgust', 2: 'fear', 3: 'joy', 4: 'neutral', 5: 'sadness', 6: 'surprise'}`
 

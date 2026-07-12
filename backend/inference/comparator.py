@@ -34,6 +34,18 @@ _VALENCE_MAP: Dict[str, str] = {
     "joyful":     "positive",
     "happy":      "positive",
     "surprised":  "neutral",
+    # Extended 17-class checkpoint labels
+    "hopeful":       "positive",
+    "confident":     "positive",
+    "grateful":      "positive",
+    "compassion":    "positive",
+    "impressed":     "positive",
+    "anticipation":  "neutral",
+    "annoyed":       "negative",
+    "apprehensive":  "negative",
+    "guilty":        "negative",
+    "confused":      "neutral",
+    "neutral":       "neutral",
 }
 _POLARITY_PROXIMITY_THRESHOLD: float = 0.20
 # Wider threshold used when the secondary branch has low confidence.
