@@ -6,7 +6,6 @@ import torch
 from pathlib import Path
 from config import APIConfig
 from inference.pipeline import RealTimeInference
-from multilingual_summarizer.summarizer import BilingualSummarizer
 
 def main():
     parser = argparse.ArgumentParser(description="Sentiment & Summarization CLI")
@@ -29,31 +28,15 @@ def main():
     else:
         text = args.text
 
-    # 2. STAGE 1: Load and run Sentiment Model
-    print("[~] Loading sentiment model...")
+    # 2. Load all models eagerly at startup (sentiment + translator + summarizer)
+    print("[~] Loading all models...")
     inference = RealTimeInference(model_path=APIConfig.MODEL_PATH)
     
+    # 3. Run sentiment analysis (pipeline internally runs the summarizer too)
     print("[~] Running sentiment analysis...")
     sentiment_result = inference.predict(text, language=args.language)
-    
-    # 3. CLEANUP: Free GPU memory before loading summarizer
-    print("[~] Cleaning up sentiment model from GPU...")
-    del inference
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
-    # 4. STAGE 2: Load and run Summarization Model
-    print("[~] Loading summarizer model...")
-    summarizer = BilingualSummarizer()
-    
-    print("[~] Generating summary...")
-    summary_result = summarizer.summarize(
-        text=text,
-        language=args.language,
-        summary_length=args.length
-    )
-
-    # 5. Output
+    # 4. Output
     overall = sentiment_result.get("overall_sentiment", {})
     print("\n" + "="*50)
     print("ANALYSIS SUMMARY")
@@ -62,7 +45,7 @@ def main():
     print(f"Dominant Emotion: {overall.get('dominant_emotion')}")
     print(f"Polarity: {overall.get('polarity_description')}")
     print(f"\n{'SUMMARY':-^50}")
-    print(f"{summary_result['summary']}")
+    print(f"{sentiment_result.get('summary', 'N/A')}")
     print("="*50)
 
 if __name__ == "__main__":

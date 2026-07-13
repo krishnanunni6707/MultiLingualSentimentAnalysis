@@ -121,7 +121,7 @@ class MultiTaskSentimentModel(nn.Module):
         self.num_emotions = num_emotions or ModelConfig.NUM_EMOTION_LABELS
 
         # Load multilingual encoder
-        self.encoder = AutoModel.from_pretrained(model_name)
+        self.encoder = AutoModel.from_pretrained(model_name, local_files_only=True)
         self.config = self.encoder.config
         self._supports_token_type_ids = "token_type_ids" in inspect.signature(self.encoder.forward).parameters
 

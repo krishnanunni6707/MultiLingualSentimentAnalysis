@@ -25,14 +25,28 @@ class BilingualSummarizer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {self.device}")
         
-        # Load model with token from .env
+        # 4-bit quantization config for reduced VRAM usage
+        quantization_config = None
+        if self.device == "cuda":
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
+        
+        # Load model with token from .env and local cache only
         print(f"Loading model: {model_name}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, token=HF_TOKEN, local_files_only=True
+        )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             token=HF_TOKEN,
+            quantization_config=quantization_config,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            device_map="auto" if self.device == "cuda" else None
+            device_map="auto" if self.device == "cuda" else None,
+            local_files_only=True,
         )
         
         if self.device == "cpu":

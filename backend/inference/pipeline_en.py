@@ -37,8 +37,8 @@ EMOTION_LABELS_EN = [
 
 class SentimentInferencePipelineEN:
     """
-    Complete inference pipeline for English sentiment analysis (lazy-loaded).
-    Model loads on first inference call to save memory.
+    Complete inference pipeline for English sentiment analysis.
+    Model loads eagerly at init time so it is ready for immediate use.
     """
 
     def __init__(
@@ -49,7 +49,7 @@ class SentimentInferencePipelineEN:
         emotion_labels: List[str] = EMOTION_LABELS_EN,
     ):
         """
-        Initialize inference pipeline (lazy-loads model on first use)
+        Initialize inference pipeline (eagerly loads model)
 
         Args:
             model_path: Path to model checkpoint (trained via
@@ -63,42 +63,25 @@ class SentimentInferencePipelineEN:
         self.batch_size = batch_size
         self.emotion_labels = emotion_labels
 
-        # Lazy load: store config, don't load model yet 
-        self.model = None
-        self.tokenizer = None
-        self._loaded = False
-        self._model_path = model_path
-        self._device = device
-
         # Segmentation + output assembly
         self.segmenter = DocumentSegmenter(language="en")
         self.output_assembler = OutputAssembler(emotion_labels=self.emotion_labels)
 
-    def _ensure_loaded(self):
-        """Load model and tokenizer on first use (lazy loading)."""
-        if self._loaded:
-            return  # Already loaded, skip
-        
-        logger.info(f"[Lazy Load] Loading English sentiment model..")
-        print(f"[~] Loading English sentiment model...")
-        
-        try:
-            # Load model and tokenizer using the shared checkpoint loader
-            self.model, self.tokenizer, resolved_labels = load_model(
-                checkpoint_path=self._model_path,
-                emotion_labels=None,
-                model_name=ModelConfigEN.MODEL_NAME,
-            )
-            # model.id2label is the canonical source
-            self.emotion_labels = resolved_labels
-            
-            self.model.to(self._device)
-            self.model.eval()
-            self._loaded = True
-            logger.info(f"English sentiment model loaded on {self._device}")
-        except Exception as e:
-            logger.error(f"Failed to load English model: {str(e)}")
-            raise
+        # Eager load: load model and tokenizer immediately
+        logger.info("Loading English sentiment model..")
+        print("[~] Loading English sentiment model...")
+
+        self.model, self.tokenizer, resolved_labels = load_model(
+            checkpoint_path=model_path,
+            emotion_labels=None,
+            model_name=ModelConfigEN.MODEL_NAME,
+        )
+        # model.id2label is the canonical source
+        self.emotion_labels = resolved_labels
+
+        self.model.to(self.device)
+        self.model.eval()
+        logger.info(f"English sentiment model loaded on {self.device}")
 
     def preprocess_text(self, text: str) -> Tuple[List[str], Dict]:
         """
@@ -122,8 +105,6 @@ class SentimentInferencePipelineEN:
         Returns:
             List of predictions for each segment
         """
-        self._ensure_loaded()  # Load on first call
-        
         results = []
 
         # Tokenize all texts
@@ -304,15 +285,6 @@ class RealTimeInferenceEN:
 
 
 if __name__ == "__main__":
-    import json
-
-    # Test inference pipeline
-    pipeline = SentimentInferencePipelineEN()
-
-    test_text = "I absolutely loved this movie, it was so inspiring and wonderful!"
-
-    # Process document
-    result = pipeline.process_document(test_text, return_segments=True)
-
-    print("\nInference Results:")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    from pathlib import Path
+    my_model_path = str(Path(__file__).resolve().parents[1] / "EngModel" / "model" / "final_model.pt")
+    pipeline = SentimentInferencePipelineEN(model_path=my_model_path)

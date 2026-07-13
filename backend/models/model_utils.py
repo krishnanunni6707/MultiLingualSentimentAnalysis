@@ -6,6 +6,7 @@ model/checkpoint loading.
 """
 
 import torch
+import os
 from transformers import AutoTokenizer
 from typing import Any, Dict, Tuple, Optional, List
 
@@ -23,9 +24,12 @@ class AutoSequenceClassifierWrapper(nn.Module):
     """
     Wrapper for sequence classification models to conform to the MultiTaskSentimentModel API.
     """
-    def __init__(self, model_name_or_path: str, temperature: float = 1.0):
+    def __init__(self, model_name_or_path: str, classifier: Optional[nn.Module] = None, temperature: float = 1.0):
         super().__init__()
-        self.classifier = AutoModelForSequenceClassification.from_pretrained(model_name_or_path)
+        if classifier is not None:
+            self.classifier = classifier
+        else:
+            self.classifier = AutoModelForSequenceClassification.from_pretrained(model_name_or_path, local_files_only=True)
         self.config = self.classifier.config
         self.id2label = self.config.id2label
         self.label2id = {v: k for k, v in self.id2label.items()}
@@ -86,9 +90,9 @@ class ModelTokenizer:
 
     def __init__(self, model_name: str = ModelConfig.MODEL_NAME):
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
         except Exception:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, local_files_only=True)
         self.max_length = ModelConfig.MAX_SEQUENCE_LENGTH
 
     def encode(
@@ -166,34 +170,59 @@ def load_model(
     emotion_labels: Optional[List[str]] = None,
     model_name: str = ModelConfig.MODEL_NAME,
 ) -> Tuple[nn.Module, ModelTokenizer, List[str]]:
-    """
-    Load a context-aware sequence classification model and its corresponding tokenizer.
-    Supports CUDA mapping if available.
-    """
-    import os
+    
+    # 1. Prioritize your custom checkpoint
     if checkpoint_path and os.path.isfile(checkpoint_path):
-        logger.info(f"Loading custom model from checkpoint: {checkpoint_path}")
+        logger.info(f"Loading custom model from: {checkpoint_path}")
         payload = _load_checkpoint_payload(checkpoint_path)
         
-        payload_model_name = payload.get("model_name", model_name)
-        labels = payload.get("emotion_labels") or emotion_labels
-        if not labels:
-            labels = list(ModelConfig.DEFAULT_EMOTION_LABELS)
+        # FIX: Define the model name correctly
+        payload_model_name = payload.get("model_name", "j-hartmann/emotion-english-distilroberta-base")
+        labels = emotion_labels or payload.get("emotion_labels")
+        
+        # Check if the checkpoint belongs to the custom MultiTaskSentimentModel
+        is_multitask = any(
+            k.startswith("encoder.") or
+            k.startswith("emotion_head.") or
+            k.startswith("polarity_head.") or
+            k.startswith("intensity_head.")
+            for k in payload["state_dict"].keys()
+        )
+
+        if is_multitask:
+            logger.info("Detected custom MultiTaskSentimentModel checkpoint.")
+            model = MultiTaskSentimentModel(payload_model_name, num_emotions=len(labels))
+            model.load_state_dict(payload["state_dict"])
             
-        model = MultiTaskSentimentModel(payload_model_name, num_emotions=len(labels))
-        model.load_state_dict(payload["state_dict"])
-        
-        # Attach id2label and label2id mappings for pipeline compatibility
-        model.id2label = {i: label for i, label in enumerate(labels)}
-        model.label2id = {label: i for i, label in enumerate(labels)}
-        
-        tokenizer = ModelTokenizer(model_name=payload_model_name)
-        
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model.to(device)
-        
-        logger.info(f"Loaded custom model {payload_model_name} from checkpoint on device {device} with labels: {labels}")
-        return model, tokenizer, labels
+            # Attach id2label and label2id mappings for pipeline compatibility
+            model.id2label = {i: label for i, label in enumerate(labels)}
+            model.label2id = {label: i for i, label in enumerate(labels)}
+            
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model.to(device)
+            
+            return model, ModelTokenizer(payload_model_name), labels
+        else:
+            logger.info("Detected sequence classification checkpoint. Wrapping model...")
+            # Initialize architecture
+            model = AutoModelForSequenceClassification.from_pretrained(
+                payload_model_name,
+                num_labels=len(labels),
+                ignore_mismatched_sizes=True,
+                local_files_only=True
+            )
+            model.load_state_dict(payload["state_dict"])
+            
+            # We pass the model directly to the wrapper to avoid double-loading
+            wrapper = AutoSequenceClassifierWrapper(payload_model_name, classifier=model)
+            wrapper.id2label = {i: label for i, label in enumerate(labels)}
+            wrapper.label2id = {label: i for i, label in enumerate(labels)}
+            
+            # Ensure device consistency
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            wrapper.to(device)
+            
+            return wrapper, ModelTokenizer(payload_model_name), labels
 
     # 1. Determine if this is Hindi or English path
     is_english = False
@@ -211,7 +240,7 @@ def load_model(
         for name in ["j-hartmann/emotion-english-distilroberta-base"]:
             try:
                 from transformers import AutoConfig
-                AutoConfig.from_pretrained(name)
+                AutoConfig.from_pretrained(name, local_files_only=True)
                 resolved_model_name = name
                 logger.info(f"Successfully selected English model: {resolved_model_name}")
                 break
@@ -225,7 +254,7 @@ def load_model(
         for name in ["vashuag/HindiEmotion"]:
             try:
                 from transformers import AutoConfig
-                AutoConfig.from_pretrained(name)
+                AutoConfig.from_pretrained(name, local_files_only=True)
                 resolved_model_name = name
                 logger.info(f"Successfully selected Hindi model: {resolved_model_name}")
                 break

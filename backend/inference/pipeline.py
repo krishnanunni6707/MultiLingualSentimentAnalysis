@@ -127,8 +127,13 @@ class SentimentInferencePipeline:
         self.output_assembler = OutputAssembler(emotion_labels=self.emotion_labels)
 
         default_english_checkpoint = Path(CHECKPOINT_DIR) / "en" / "best_model.pt"
-        if english_model_path is None and default_english_checkpoint.exists():
-            english_model_path = str(default_english_checkpoint)
+        fallback_english_checkpoint = Path(__file__).resolve().parents[1] / "EngModel" / "model" / "final_model.pt"
+        
+        if english_model_path is None:
+            if default_english_checkpoint.exists():
+                english_model_path = str(default_english_checkpoint)
+            elif fallback_english_checkpoint.exists():
+                english_model_path = str(fallback_english_checkpoint)
 
         self.translator = HindiToEnglishTranslator(
             model_name=TranslationConfig.MODEL_NAME,
