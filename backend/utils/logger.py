@@ -11,6 +11,39 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+
+class SafeStreamWrapper:
+    """
+    Wrapper around a stream to catch and suppress OSError (e.g. [Errno 5] Input/output error)
+    during write() or flush() operations, which commonly occurs in PyTorch
+    multiprocessing dataloaders during fork.
+    """
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, data):
+        try:
+            return self.stream.write(data)
+        except OSError:
+            return 0
+
+    def flush(self):
+        try:
+            self.stream.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+# Wrap standard output streams to prevent multiprocessing crash on fork
+if sys.stdout is not None:
+    sys.stdout = SafeStreamWrapper(sys.stdout)
+if sys.stderr is not None:
+    sys.stderr = SafeStreamWrapper(sys.stderr)
+
+
 _ROOT_CONFIGURED = False
 
 DEFAULT_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

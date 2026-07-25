@@ -54,7 +54,7 @@ class TrainingConfig:
     MAX_GRAD_NORM = 1.0
 
     
-    EMOTION_LOSS_WEIGHT = 1.0
+    EMOTION_LOSS_WEIGHT = 5.0  # FIXED: Increased from 1.0 to handle sparse multi-label
     POLARITY_LOSS_WEIGHT = 0.8
     INTENSITY_LOSS_WEIGHT = 0.8
 

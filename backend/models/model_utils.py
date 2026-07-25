@@ -191,16 +191,54 @@ def load_model(
 
         if is_multitask:
             logger.info("Detected custom MultiTaskSentimentModel checkpoint.")
-            model = MultiTaskSentimentModel(payload_model_name, num_emotions=len(labels))
-            model.load_state_dict(payload["state_dict"])
-            
+
+            # Determine the emotion head size saved in the checkpoint
+            ckpt_num_emotions = None
+            for key in ("emotion_head.classifier.bias", "emotion_head.classifier.weight"):
+                if key in payload["state_dict"]:
+                    ckpt_num_emotions = payload["state_dict"][key].shape[0]
+                    break
+
+            target_num_emotions = len(labels)
+
+            # Build fresh model with the target label count
+            model = MultiTaskSentimentModel(payload_model_name, num_emotions=target_num_emotions)
+
+            if ckpt_num_emotions is not None and ckpt_num_emotions != target_num_emotions:
+                logger.warning(
+                    f"Emotion head size mismatch: checkpoint has {ckpt_num_emotions} classes, "
+                    f"current dataset has {target_num_emotions} classes. "
+                    "Encoder + polarity/intensity heads will be restored from checkpoint; "
+                    "emotion head classifier will be randomly re-initialized."
+                )
+                # PyTorch ≥2.0 raises on size mismatches even with strict=False.
+                # Manually drop the incompatible emotion-head classifier keys so
+                # everything else (encoder, polarity head, intensity head) transfers.
+                emotion_head_keys = {
+                    k for k in payload["state_dict"]
+                    if k.startswith("emotion_head.classifier.")
+                }
+                filtered_state = {
+                    k: v for k, v in payload["state_dict"].items()
+                    if k not in emotion_head_keys
+                }
+                logger.info(f"  Dropped checkpoint keys for re-init: {sorted(emotion_head_keys)}")
+                incompatible = model.load_state_dict(filtered_state, strict=False)
+            else:
+                incompatible = model.load_state_dict(payload["state_dict"], strict=False)
+
+            if incompatible.unexpected_keys:
+                logger.info(f"  Ignored unexpected keys: {incompatible.unexpected_keys}")
+            if incompatible.missing_keys:
+                logger.info(f"  Missing (re-initialized) keys: {incompatible.missing_keys}")
+
             # Attach id2label and label2id mappings for pipeline compatibility
             model.id2label = {i: label for i, label in enumerate(labels)}
             model.label2id = {label: i for i, label in enumerate(labels)}
-            
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model.to(device)
-            
+
             return model, ModelTokenizer(payload_model_name), labels
         else:
             logger.info("Detected sequence classification checkpoint. Wrapping model...")

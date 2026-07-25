@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from typing import Optional
 from pathlib import Path
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Load environment variables from .env
 load_dotenv()
@@ -36,6 +39,7 @@ class BilingualSummarizer:
             )
         
         # Load model with token from .env and local cache only
+        logger.info(f"Loading model: {model_name}..")
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, token=HF_TOKEN, local_files_only=True
@@ -52,6 +56,7 @@ class BilingualSummarizer:
         if self.device == "cpu":
             self.model.to(self.device)
         
+        logger.info("Model loaded successfully")
         print("Model loaded successfully!")
     
     def detect_language(self, text: str) -> str:
@@ -77,8 +82,11 @@ class BilingualSummarizer:
         system_context = systems[language]
         if sentiment_data:
             emotion = sentiment_data.get("dominant_emotion","neutral")
+            logger.info(f"Dominent Emotion: {emotion}")
             intensity = sentiment_data.get("intensity_description", "moderate")
+            logger.info(f"Intensity description: {intensity}")
             system_context += f" Tone Context: The input text conveys a {intensity} {emotion} tone."
+            logger.info(f"System Context: {system_context}")
         
         prompts = {
             'en': {
@@ -104,7 +112,6 @@ class BilingualSummarizer:
             {"role": "system", "content": system_context},
             {"role": "user", "content": prompts[language][summary_length].format(text=text)}
         ]
-        
         # 3. Apply chat template and get the formatted text
         formatted_text = self.tokenizer.apply_chat_template(
             messages, 

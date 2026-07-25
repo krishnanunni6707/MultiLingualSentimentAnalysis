@@ -16,8 +16,11 @@ from data.dataloader import DEFAULT_DATA_FILE, create_data_loaders
 from training.trainer import Trainer
 from utils.logger import setup_logger, get_logger
 
-# Configure logging (writes to logs/training.log + console, via shared logger)
-setup_logger(log_file=str(LOG_DIR / "training.log"))
+# Configure logging (writes to logs/training.log + console, via shared logger).
+# force=True is required: importing training.trainer above triggers get_logger()
+# inside sub-modules which calls setup_logger() with no log_file and sets
+# _ROOT_CONFIGURED=True. Without force, this call is silently skipped.
+setup_logger(log_file=str(LOG_DIR / "training.log"), force=True)
 logger = get_logger(__name__)
 
 
@@ -86,7 +89,9 @@ def train(
     logger.info(f"  Batch Size: {TrainingConfig.BATCH_SIZE}")
     logger.info(f"  Learning Rate: {TrainingConfig.LEARNING_RATE}")
     logger.info(f"  Device: {device}")
-    logger.info(f"  Output Directory: {output_dir}\n")
+    logger.info(f"  Output Directory: {output_dir}")
+    logger.info(f"  Text log file:    {LOG_DIR / 'training.log'}")
+    logger.info(f"  Metrics CSV:      {output_dir / 'training_metrics.csv'}\n")
 
     # Create tokenizer first, then data loaders so we can derive the label set
     logger.info("Loading tokenizer...")

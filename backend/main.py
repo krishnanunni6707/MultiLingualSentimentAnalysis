@@ -1,11 +1,14 @@
 import sys
 from utils.logger import setup_logger
+from utils.logger import get_logger
 setup_logger(log_file="logs/app.log", force=True)
 import argparse
 import torch
 from pathlib import Path
 from config import APIConfig
 from inference.pipeline import RealTimeInference
+
+logger = get_logger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description="Sentiment & Summarization CLI")
@@ -38,10 +41,12 @@ def main():
 
     # 4. Output
     overall = sentiment_result.get("overall_sentiment", {})
+    metadata = sentiment_result.get("metadata", {})
+    
     print("\n" + "="*50)
     print("ANALYSIS SUMMARY")
     print("="*50)
-    print(f"Language: {sentiment_result.get('detected_language', args.language or 'auto')}")
+    print(f"Language: {metadata.get('language', args.language or 'auto')}")
     print(f"Dominant Emotion: {overall.get('dominant_emotion')}")
     print(f"Polarity: {overall.get('polarity_description')}")
     print(f"\n{'SUMMARY':-^50}")
@@ -49,4 +54,6 @@ def main():
     print("="*50)
 
 if __name__ == "__main__":
+    logger.info("Starting the Readers Digest Engine....")
+    logger.info("Pre loading the Custom Models")
     main()

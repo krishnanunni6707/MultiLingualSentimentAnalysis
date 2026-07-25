@@ -18,11 +18,9 @@ from models.model_utils import ModelTokenizer
 logger = logging.getLogger(__name__)
 
 
-# Default polarity assigned to each emotion label (-1 negative, +1 positive, 0 neutral/ambiguous).
-# This is a starting guess — please review and adjust once you know the FULL set of
-# unique labels in your `emotions` column, e.g.:
-#   pd.read_csv(...)["emotions"].str.split(",").explode().str.strip().unique()
+# Polarity assigned to each emotion label (-1 negative, +1 positive, 0 neutral/ambiguous).
 DEFAULT_EMOTION_POLARITY = {
+    # Original categories
     "anger": -1.0,
     "sad": -1.0,
     "sadness": -1.0,
@@ -36,9 +34,61 @@ DEFAULT_EMOTION_POLARITY = {
     "happiness": 1.0,
     "confident": 1.0,
     "trust": 1.0,
-    "anticipation": 0.0,   # context-dependent; treated as neutral by default
-    "surprise": 0.0,       # ambiguous polarity by default
+    "anticipation": 0.0,
+    "surprise": 0.0,
     "neutral": 0.0,
+
+    # Newly identified categories
+    "admiring": 0.8,
+    "amused": 0.6,
+    "anxiety": -0.6,
+    "compassion": 0.8,
+    "determined": 0.4,
+    "enthusiastic": 0.9,
+    "frustrated": -0.7,
+    "impatience": -0.4,
+    "optimistic": 0.8,
+    "patience": 0.5,
+    "proud": 0.7,
+    "realization": 0.2,
+    "resentful": -0.8,
+    "relieved": 0.6,
+    "serene": 0.7,
+    "serious": 0.0,
+    "serenity": 0.7,
+    "wisdom": 0.5,
+}
+
+EMOTION_REMAPPING = {
+    # Fear spectrum
+    "anxiety": "fear",
+    "apprehensive": "fear",
+    
+    # Anger spectrum
+    "frustrated": "anger",
+    "annoyed": "anger",
+    "resentful": "anger",
+    "impatience": "anger",
+    
+    # Hopeful / Positive spectrum
+    "optimistic": "hopeful",
+    "determined": "confident",
+    "enthusiastic": "joy",
+    "proud": "joy",
+    "amused": "joy",
+    
+    # Neutral / Calm spectrum
+    "serene": "neutral",
+    "serenity": "neutral",
+    "patience": "neutral",
+    "serious": "neutral",
+    
+    # Impressed / Other spectrum
+    "admiring": "impressed",
+    "wisdom": "impressed",
+    "trust": "confident",
+    "realization": "surprised",
+    "relieved": "grateful",
 }
 
 
@@ -48,27 +98,6 @@ class HindiSentimentCSVDataset(Dataset):
 
     Expected CSV columns:
         dialogueId, utterance_no, authorRole, utterance, emotions, emoIntensity
-
-    - `emotions`     : comma-separated emotion labels, e.g. "sad,anger"
-    - `emoIntensity` : comma-separated intensities, positionally aligned with
-                       `emotions`, e.g. "3,3" (raw scale, e.g. 0-3; normalized
-                       internally using `max_intensity`)
-
-    `data_file` can be:
-      - a path to a single CSV
-      - a list of CSV paths
-      - a directory (e.g. "data/raw" or "data/raw/emotion_hindi") — in which
-        case every "*.csv" found recursively under it is loaded and combined,
-        assuming they all share the same schema. `dialogueId` is prefixed
-        per source file to avoid collisions across combined datasets.
-
-    Design choices baked in here:
-    - Only rows where authorRole == "user" are kept (bot turns dropped).
-    - Each row is treated as an INDEPENDENT sample — no dialogue/context
-      from previous turns is used.
-    - There is no `polarity` column in the source data, so polarity is
-      DERIVED per-sample as an intensity-weighted average of each present
-      emotion's polarity sign (see DEFAULT_EMOTION_POLARITY).
     """
 
     def __init__(
@@ -92,8 +121,7 @@ class HindiSentimentCSVDataset(Dataset):
         # Load + filter
         raw_df = self._load_csv(data_file, author_role_filter)
 
-        # Build a stable emotion vocabulary from the full (filtered) dataset,
-        # so the vector index for e.g. "anger" is consistent across train/val/test.
+        # Build stable emotion vocabulary
         self.emotion_vocab = self._build_emotion_vocab(raw_df)
         logger.info(f"Discovered {len(self.emotion_vocab)} emotion labels: {self.emotion_vocab}")
 
@@ -113,20 +141,7 @@ class HindiSentimentCSVDataset(Dataset):
 
         logger.info(f"Loaded {len(self.data)} samples for {split} split")
 
-    # ------------------------------------------------------------------ #
-    # Loading & parsing
-    # ------------------------------------------------------------------ #
-
     def _resolve_data_files(self, data_file: Union[str, List[str]]) -> List[Path]:
-        """
-        Resolve `data_file` into a concrete list of CSV paths.
-
-        Accepts:
-          - a single CSV path, e.g. "data/raw/emotion_hindi/dialogues.csv"
-          - a list of CSV paths
-          - a directory, e.g. "data/raw" or "data/raw/emotion_hindi" — in which
-            case ALL "*.csv" files found recursively under it are used
-        """
         if isinstance(data_file, (list, tuple)):
             paths = [Path(p) for p in data_file]
         else:
@@ -135,10 +150,7 @@ class HindiSentimentCSVDataset(Dataset):
                 paths = sorted(p.rglob("*.csv"))
                 if not paths:
                     raise FileNotFoundError(f"No CSV files found under directory: {data_file}")
-                logger.info(
-                    f"Auto-discovered {len(paths)} CSV file(s) under {data_file}: "
-                    f"{[str(x) for x in paths]}"
-                )
+                logger.info(f"Auto-discovered {len(paths)} CSV file(s) under {data_file}")
             else:
                 paths = [p]
 
@@ -151,13 +163,6 @@ class HindiSentimentCSVDataset(Dataset):
     def _load_csv(
         self, data_file: Union[str, List[str]], author_role_filter: Optional[str]
     ) -> pd.DataFrame:
-        """
-        Load one or more CSV files and concatenate them into a single DataFrame.
-        Assumes all files share the same schema. A `_source_file` column is added,
-        and `dialogueId` (if present) is prefixed per-source-file to avoid
-        collisions when combining multiple raw datasets that each start their
-        own dialogueId numbering from 0.
-        """
         paths = self._resolve_data_files(data_file)
 
         frames = []
@@ -168,10 +173,7 @@ class HindiSentimentCSVDataset(Dataset):
             if reference_cols is None:
                 reference_cols = set(df.columns)
             elif set(df.columns) != reference_cols:
-                logger.warning(
-                    f"Column mismatch in {path}: expected {reference_cols}, "
-                    f"got {set(df.columns)}. Proceeding, but check schemas match."
-                )
+                logger.warning(f"Column mismatch in {path}. Proceeding, but check schemas match.")
 
             df["_source_file"] = path.stem
             if "dialogueId" in df.columns:
@@ -189,25 +191,21 @@ class HindiSentimentCSVDataset(Dataset):
         if author_role_filter is not None:
             df = df[df["authorRole"] == author_role_filter].reset_index(drop=True)
 
-        # Drop rows with missing utterance text
         df = df.dropna(subset=["utterance"]).reset_index(drop=True)
 
         if len(df) == 0:
-            raise ValueError(
-                f"No rows left after filtering authorRole == {author_role_filter!r}. "
-                f"Check the CSV's authorRole values."
-            )
+            raise ValueError(f"No rows left after filtering authorRole == {author_role_filter!r}.")
 
         logger.info(f"Loaded {len(df)} rows from {len(paths)} file(s)")
-
         return df
 
     def _build_emotion_vocab(self, df: pd.DataFrame) -> List[str]:
-        """Scan the full dataset once to build a stable, sorted emotion vocabulary."""
         vocab = set()
         for emo_str in df["emotions"].fillna("neutral"):
             for label in str(emo_str).split(","):
                 label = label.strip().lower()
+                # Apply remapping to group sparse classes
+                label = EMOTION_REMAPPING.get(label, label)
                 if label:
                     vocab.add(label)
         return sorted(vocab)
@@ -216,35 +214,34 @@ class HindiSentimentCSVDataset(Dataset):
         self, emo_str: str, intensity_str: str
     ) -> Tuple[torch.Tensor, float, float]:
         """
-        Parse comma-separated emotion labels + comma-separated intensities into:
-          - a multi-label emotion vector (sized to self.emotion_vocab), filled
-            with normalized intensity (0-1) for each emotion present
-          - a derived polarity scalar (-1 to 1): intensity-weighted average of
-            each present emotion's polarity sign
-          - an overall intensity scalar (0-1): the max normalized intensity
-            across the emotions present in this sample
+        Parse comma-separated emotion labels + comma-separated intensities.
         """
-        labels = [l.strip().lower() for l in str(emo_str).split(",") if l.strip()]
-        intens_raw = [i.strip() for i in str(intensity_str).split(",") if i.strip()]
+        # Safely handle unexpected NaN or float items in CSV string columns
+        emo_str = str(emo_str) if pd.notna(emo_str) else "neutral"
+        intensity_str = str(intensity_str) if pd.notna(intensity_str) else "1"
 
+        labels = [l.strip().lower() for l in emo_str.split(",") if l.strip()]
+        intens_raw = [i.strip() for i in intensity_str.split(",") if i.strip()]
+
+        # If a single overall intensity number was provided for multiple emotions, duplicate it
+        if len(intens_raw) == 1 and len(labels) > 1:
+            intens_raw = intens_raw * len(labels)
+
+        # Pad or truncate intensity list to precisely match label array length
         if len(intens_raw) != len(labels):
             logger.warning(
-                f"Emotion/intensity length mismatch: {emo_str!r} vs {intensity_str!r}; "
-                f"defaulting missing intensities to 1.0"
+                f"Emotion/intensity length mismatch: {emo_str!r} vs {intensity_str!r}; standardizing lengths."
             )
-            intens = [1.0] * len(labels)
-            for i, val in enumerate(intens_raw[: len(labels)]):
-                try:
-                    intens[i] = float(val)
-                except ValueError:
-                    pass
-        else:
-            intens = []
-            for val in intens_raw:
-                try:
-                    intens.append(float(val))
-                except ValueError:
-                    intens.append(1.0)
+            while len(intens_raw) < len(labels):
+                intens_raw.append("1.0")
+            intens_raw = intens_raw[:len(labels)]
+
+        intens = []
+        for val in intens_raw:
+            try:
+                intens.append(float(val))
+            except ValueError:
+                intens.append(1.0)
 
         emotion_vec = torch.zeros(len(self.emotion_vocab))
         weighted_polarity_sum = 0.0
@@ -252,11 +249,16 @@ class HindiSentimentCSVDataset(Dataset):
 
         for label, intensity in zip(labels, intens):
             norm_intensity = min(intensity / self.max_intensity, 1.0)
+            
+            # Remap the class before matching vocabulary indices
+            mapped_label = EMOTION_REMAPPING.get(label, label)
 
-            if label in self.emotion_vocab:
-                idx = self.emotion_vocab.index(label)
-                emotion_vec[idx] = norm_intensity
+            if mapped_label in self.emotion_vocab:
+                idx = self.emotion_vocab.index(mapped_label)
+                # Use max() in case multiple raw labels collapse into the same target class
+                emotion_vec[idx] = max(emotion_vec[idx], torch.tensor(norm_intensity))
 
+            # Keep polarity lookups matching the original label
             polarity_sign = self.emotion_polarity_map.get(label, 0.0)
             if label not in self.emotion_polarity_map:
                 logger.warning(f"Unmapped emotion label '{label}' — treated as neutral (0.0)")
@@ -303,17 +305,13 @@ class HindiSentimentCSVDataset(Dataset):
         )
         return train_data, val_data, test_data
 
-    # ------------------------------------------------------------------ #
-    # Dataset interface
-    # ------------------------------------------------------------------ #
-
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.data[idx]
-
         text = sample["text"]
+        
         if not text:
             raise ValueError(f"Missing text in sample {idx}")
 
@@ -323,6 +321,6 @@ class HindiSentimentCSVDataset(Dataset):
             "input_ids": encoding["input_ids"].squeeze(),
             "attention_mask": encoding["attention_mask"].squeeze(),
             "emotion_labels": sample["emotion_labels"],
-            "polarity_labels": torch.tensor([sample["polarity"]], dtype=torch.float),
-            "intensity_labels": torch.tensor([sample["intensity"]], dtype=torch.float),
+            "polarity_labels": torch.tensor(sample["polarity"], dtype=torch.float),
+            "intensity_labels": torch.tensor(sample["intensity"], dtype=torch.float),
         }
