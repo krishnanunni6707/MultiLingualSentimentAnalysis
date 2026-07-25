@@ -250,8 +250,10 @@ class SentimentInferencePipeline:
             lang_confidence = 1.0
 
         if lang == "en":
+            logger.info("[~] English Language detected")
             segmenter = DocumentSegmenter(language="en")
         else:
+            logger.info("[~] Hindi Language detected")
             segmenter = DocumentSegmenter(language="hi")
 
         segments, metadata = segmenter.segment(text)
