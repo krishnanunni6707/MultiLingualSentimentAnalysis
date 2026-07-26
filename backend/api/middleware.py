@@ -45,16 +45,17 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 
 	async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
 		if request.method in {"POST", "PUT", "PATCH"}:
-			body = await request.body()
-			if len(body) > self.max_request_bytes:
-				return JSONResponse(
-					status_code=413,
-					content={
-						"detail": (
-							f"Request body too large. Max size: {self.max_request_bytes} bytes"
-						)
-					},
-				)
+			content_length = request.headers.get("content-length")
+			if content_length and content_length.isdigit():
+				if int(content_length) > self.max_request_bytes:
+					return JSONResponse(
+						status_code=413,
+						content={
+							"detail": (
+								f"Request body too large. Max size: {self.max_request_bytes} bytes"
+							)
+						},
+					)
 
 		return await call_next(request)
 

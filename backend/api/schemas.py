@@ -4,7 +4,7 @@ Shared Pydantic models for the sentiment analysis API.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import APIConfig
 
@@ -16,14 +16,30 @@ class SentimentRequest(BaseModel):
 	return_segments: bool = Field(False, description="Return individual segment results")
 	language: Optional[str] = Field(
 		default=None,
-		description="Language code, auto-detected if not provided",
+		description="Language code ('en' or 'hi'). Auto-detected when omitted or set to 'auto'.",
 	)
+	summarize: bool = Field(
+		default=False,
+		description="Run the Llama summarizer (slow, opt-in). Set to true only when a summary is needed.",
+	)
+
+	@field_validator("language", mode="before")
+	@classmethod
+	def normalize_language(cls, v: Any) -> Optional[str]:
+		"""Treat 'auto', '', or None as None so the pipeline always auto-detects."""
+		if v is None:
+			return None
+		normalized = str(v).strip().lower()
+		if normalized in ("", "auto"):
+			return None
+		return normalized
 
 	model_config = ConfigDict(
 		json_schema_extra={
 			"example": {
 				"text": "यह फिल्म बहुत अच्छी थी, मुझे बहुत पसंद आई।",
 				"return_segments": False,
+				"summarize": False,
 			}
 		}
 	)
@@ -43,13 +59,21 @@ class CrossCheckBranch(BaseModel):
 
 
 class SegmentCrossCheck(BaseModel):
-	"""Per-segment cross-check payload comparing both inference branches."""
+	"""
+	Per-segment cross-check payload comparing both inference branches.
 
-	hindi_direct: CrossCheckBranch
-	english_translated: CrossCheckBranch
-	agreement: bool
-	strategy_used: str
-	primary_source: str
+	All branch fields are Optional to accommodate the ``skipped_for_native_precision``
+	mode used when the input is already in Hindi (no translation / cross-check is
+	performed; only ``status`` will be present).
+	"""
+
+	status: Optional[str] = None
+	hindi_direct: Optional[CrossCheckBranch] = None
+	english_translated: Optional[CrossCheckBranch] = None
+	translated_text: Optional[str] = None
+	agreement: Optional[bool] = None
+	strategy_used: Optional[str] = None
+	primary_source: Optional[str] = None
 
 
 class SegmentSentiment(BaseModel):
@@ -88,12 +112,19 @@ class SegmentResult(BaseModel):
 
 
 class CrossCheckSummary(BaseModel):
-	"""Document-level cross-check agreement summary."""
+	"""
+	Document-level cross-check agreement summary.
 
-	strategy_used: str
-	num_segments: int
-	num_agree: int
-	num_disagree: int
+	All fields except ``agreement_rate`` are Optional to accommodate the
+	``native_precision`` mode used for pure-Hindi inputs (where cross-checking
+	is intentionally skipped and only ``agreement_rate`` / ``status`` are emitted).
+	"""
+
+	status: Optional[str] = None
+	strategy_used: Optional[str] = None
+	num_segments: Optional[int] = None
+	num_agree: Optional[int] = None
+	num_disagree: Optional[int] = None
 	agreement_rate: float
 
 
@@ -123,7 +154,7 @@ class OverallSentiment(BaseModel):
 	intensity: float
 	intensity_description: str
 	confidence: float
-	num_segments: int
+	num_segments: Optional[int] = None
 	cross_check_summary: Optional[CrossCheckSummary] = None
 
 
@@ -214,3 +245,10 @@ class StreamEvent(BaseModel):
 	type: str
 	data: Optional[Dict[str, Any]] = None
 	message: Optional[str] = None
+
+
+class SpeakRequest(BaseModel):
+	"""Request model for speak (TTS) endpoint."""
+
+	text: str = Field(..., min_length=1)
+	language: str = Field(..., description="Language code ('hi' or 'en')")

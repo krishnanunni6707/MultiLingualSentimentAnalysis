@@ -30,7 +30,7 @@ def process_text(inference, text, default_language):
     
     lang_param = None if default_language == 'auto' else default_language
     try:
-        sentiment_result = inference.predict(text, language=lang_param)
+        sentiment_result = inference.predict(text, language=lang_param, summarize=True)
     except Exception as e:
         logger.error(f"Error during inference: {e}")
         print(f"Error during analysis: {e}")

@@ -6,6 +6,7 @@ Handles preprocessing/segmentation and batched model inference, and
 delegates result aggregation/formatting/saving to OutputAssembler.
 """
 
+import time
 import torch
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -122,22 +123,30 @@ class SentimentInferencePipeline:
         self.output_assembler = OutputAssembler(emotion_labels=self.emotion_labels)
 
         default_english_checkpoint = Path(CHECKPOINT_DIR) / "en" / "best_model.pt"
-        fallback_english_checkpoint = Path(__file__).resolve().parents[1] / "EngModel" / "model" / "final_model.pt"
-        
+
         if english_model_path is None:
             if default_english_checkpoint.exists():
                 english_model_path = str(default_english_checkpoint)
-            elif fallback_english_checkpoint.exists():
-                english_model_path = str(fallback_english_checkpoint)
+            # NOTE: Do NOT fall back to EngModel/model/final_model.pt — that model was
+            # trained for only 3 epochs on a small dataset and outputs near-uniform
+            # probabilities (confidence ~7% per class), making 'admiration' win arbitrarily.
+            # When english_model_path remains None, SentimentInferencePipelineEN will load
+            # the pre-trained j-hartmann/emotion-english-distilroberta-base (7 Ekman classes)
+            # which correctly identifies anger/disgust in negative complaint text.
 
         self.translator = HindiToEnglishTranslator(
             model_name=TranslationConfig.MODEL_NAME,
             device=TranslationConfig.DEVICE,
             max_length=TranslationConfig.MAX_LENGTH,
         )
+        # Force the English pipeline to CPU: the Hindi model + Llama-3.2 (4-bit)
+        # already saturate the GPU (≈3.5 GB on a 4 GB card), so running a second
+        # forward pass on CUDA will OOM.  The RoBERTa-base English model is fast
+        # enough on CPU for interactive use.
+        english_device = "cpu"
         self.english_pipeline = SentimentInferencePipelineEN(
             model_path=english_model_path,
-            device=device,
+            device=english_device,
             batch_size=batch_size,
             emotion_labels=EMOTION_LABELS_EN,
         )
@@ -216,20 +225,20 @@ class SentimentInferencePipeline:
     def _analyze_english_branch(self, segments: List[str], translate: bool = True) -> List[Dict[str, Any]]:
 
         translated_segments = self.translator.translate_batch(segments) if translate else segments
-        return self.english_pipeline.batch_inference(translated_segments)
+        results = self.english_pipeline.batch_inference(translated_segments)
+        # Attach the translated text so callers (comparator, API) can surface it
+        for i, res in enumerate(results):
+            res["translated_text"] = translated_segments[i] if translate else None
+        return results
 
     def _run_parallel_analysis(
         self,
         segments: List[str],
         translate: bool = True,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            hindi_future = executor.submit(self.batch_inference, segments)
-            english_future = executor.submit(self._analyze_english_branch, segments, translate)
-            hindi_results = hindi_future.result()
-            english_results = english_future.result()
-
+        # Run sequentially to prevent CUDA deadlocks and minimize peak VRAM usage
+        hindi_results = self.batch_inference(segments)
+        english_results = self._analyze_english_branch(segments, translate)
         return hindi_results, english_results
 
     def process_document(
@@ -238,16 +247,21 @@ class SentimentInferencePipeline:
         return_segments: bool = False,
         segment_id: str = "doc_001",
         language: Optional[str] = None,
+        summarize: bool = False,
     ) -> Dict[str, Any]:
         """
         Process a complete document.
         """
-        if language is None:
+        t_start = time.perf_counter()
+        # Normalize "auto" or empty string to None so we always run detection
+        if language is None or language.strip().lower() in ("", "auto"):
             from utils.preprocessing import LanguageDetector
             lang, lang_confidence = LanguageDetector.detect_language(text)
+            logger.info(f"[~] Auto-detected language: '{lang}' (confidence={lang_confidence:.4f})")
         else:
             lang = language
             lang_confidence = 1.0
+            logger.info(f"[~] Using provided language: '{lang}'")
 
         if lang == "en":
             logger.info("[~] English Language detected")
@@ -257,6 +271,7 @@ class SentimentInferencePipeline:
             segmenter = DocumentSegmenter(language="hi")
 
         segments, metadata = segmenter.segment(text)
+        logger.info(f"✂️ Text segmented into {len(segments)} segment(s) in {(time.perf_counter() - t_start):.3f}s")
 
         if not segments:
             return {
@@ -268,18 +283,15 @@ class SentimentInferencePipeline:
         metadata["language_confidence"] = lang_confidence
 
         translate = lang == "hi"
+        t_models = time.perf_counter()
         hindi_results, english_results = self._run_parallel_analysis(segments, translate=translate)
+        logger.info(f"🧠 Dual Model Inference (Hindi & English) completed in {(time.perf_counter() - t_models):.3f}s")
 
         segment_results = []
         for hindi_result, english_result in zip(hindi_results, english_results):
-            if lang == "hi":
-                reconciled = hindi_result.copy()
-                reconciled["cross_check"] = {"status": "skipped_for_native_precision"}
-                segment_results.append(reconciled)
-            else:
-                segment_results.append(
-                    self.comparator.reconcile(hindi_result, english_result, language=lang)
-                )
+            segment_results.append(
+                self.comparator.reconcile(hindi_result, english_result, language=lang)
+            )
 
         cross_check_summary = self.comparator.summarize(segment_results)
 
@@ -294,41 +306,23 @@ class SentimentInferencePipeline:
             cross_check_summary=cross_check_summary,
         )
 
-        # CRITICAL OVERRIDE: Prevent the OutputAssembler fallback from ruining native metrics
-        if lang == "hi" and segment_results:
-            native_dominant = segment_results[0].get("dominant_emotion", "joy")
-            native_polarity = segment_results[0].get("polarity_score", 1.0)
-            native_intensity = segment_results[0].get("intensity", 0.8)
-            native_confidence = segment_results[0].get("confidence", 0.9)
-            native_emotions = segment_results[0].get("emotions", {})
-            
-            pol_desc = "positive" if native_polarity > 0.1 else ("negative" if native_polarity < -0.1 else "neutral")
-            int_desc = "strong" if native_intensity > 0.5 else "weak"
-
-            full_result["overall_sentiment"] = {
-                "dominant_emotion": native_dominant,
-                "polarity_score": native_polarity,
-                "polarity_description": pol_desc,
-                "intensity": native_intensity,
-                "intensity_description": int_desc,
-                "confidence": native_confidence,
-                "emotions": native_emotions,
-                "cross_check_summary": {"agreement_rate": 1.0, "status": "native_precision"}
-            }
-
         summary = None
-        if self.summarizer_pipeline is not None:
+        if summarize and self.summarizer_pipeline is not None:
+            t_sum = time.perf_counter()
+            logger.info("⏳ Starting Llama-3.2 text summarization step...")
             try:
                 adapted_json = adapt_sentiment_output_to_summarizer(full_result)
-                logger.info("Sending to summarizer: %s", adapted_json)
                 summary_data = self.summarizer_pipeline.summarize(
                     text=text,
                     language=lang,
                     sentiment_data=adapted_json
                 )
                 summary = summary_data.get("summary")
+                logger.info(f"📝 Llama-3.2 text summarization completed in {(time.perf_counter() - t_sum):.3f}s")
             except Exception as e:
                 logger.error("Error during summarization : %s", e)
+        elif not summarize:
+            logger.info("⏩ Llama-3.2 text summarization skipped (summarize=False)")
 
         full_result["summary"]           = summary
         full_result["summarizer_status"] = self.summarizer_status
@@ -376,11 +370,12 @@ class RealTimeInference:
             comparison_strategy=comparison_strategy,
         )
 
-    def predict(self, text: str, language: Optional[str] = None) -> Dict[str, Any]:
-        result = self.pipeline.process_document(text, return_segments=True, language=language)
+    def predict(self, text: str, language: Optional[str] = None, summarize: bool = False) -> Dict[str, Any]:
+        result = self.pipeline.process_document(
+            text, return_segments=True, language=language, summarize=summarize
+        )
         if "error" in result:
             return result
-
         return result
 
     def predict_batch(self, texts: List[str], language: Optional[str] = None) -> List[Dict[str, Any]]:

@@ -237,7 +237,12 @@ def load_model(
             model.label2id = {label: i for i, label in enumerate(labels)}
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            model.to(device)
+            try:
+                model.to(device)
+            except Exception as err:
+                logger.warning(f"Failed to load model on {device} ({err}). Falling back to CPU.")
+                device = "cpu"
+                model.to(device)
 
             return model, ModelTokenizer(payload_model_name), labels
         else:
@@ -256,9 +261,14 @@ def load_model(
             wrapper.id2label = {i: label for i, label in enumerate(labels)}
             wrapper.label2id = {label: i for i, label in enumerate(labels)}
             
-            # Ensure device consistency
+            # Ensure device consistency with CPU fallback on OOM
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            wrapper.to(device)
+            try:
+                wrapper.to(device)
+            except Exception as err:
+                logger.warning(f"Failed to load model on {device} ({err}). Falling back to CPU.")
+                device = "cpu"
+                wrapper.to(device)
             
             return wrapper, ModelTokenizer(payload_model_name), labels
 

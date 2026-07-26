@@ -167,8 +167,26 @@ class ResultComparator:
                 primary = english_result
                 primary_source = "english_direct"
             else:
-                primary = hindi_result
-                primary_source = "hindi_direct"
+                # For Hindi inputs: if the two branches disagree on valence AND the
+                # Hindi model predicts a strongly negative emotion while the English
+                # cross-check is neutral/positive, defer to the English branch.
+                # This compensates for the known keyword-bias of the undertrained
+                # Hindi model (e.g. classifying grateful text as "disgusted").
+                hindi_valence = _valence(hindi_result["dominant_emotion"])
+                english_valence = _valence(english_result["dominant_emotion"])
+                hindi_is_strongly_negative = (
+                    hindi_valence == "negative"
+                    and hindi_result["polarity_score"] < -0.5
+                    and hindi_result["confidence"] > 0.85
+                )
+                english_is_nonnegative = english_valence in ("positive", "neutral")
+
+                if not valence_match and hindi_is_strongly_negative and english_is_nonnegative:
+                    primary = english_result
+                    primary_source = "english_translated"
+                else:
+                    primary = hindi_result
+                    primary_source = "hindi_direct"
 
         return {
             "emotions":         primary["emotions"],
@@ -179,6 +197,7 @@ class ResultComparator:
             "cross_check": {
                 "hindi_direct":      self._minimal_result(hindi_result),
                 "english_translated": self._minimal_result(english_result),
+                "translated_text":   english_result.get("translated_text"),
                 "agreement":         agreement,
                 "agreement_detail":  agreement_detail,
                 "strategy_used":     self.strategy,
