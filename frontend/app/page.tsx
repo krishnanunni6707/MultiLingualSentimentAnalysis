@@ -21,7 +21,12 @@ import {
   Volume2,
   VolumeX,
   Play,
-  Square
+  Square,
+  Keyboard,
+  Paperclip,
+  Smile,
+  Info,
+  Award
 } from "lucide-react";
 
 const PRESETS = [
@@ -59,9 +64,14 @@ export default function TextPulseApp() {
   const [customText, setCustomText] = useState("");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
+  const stepTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [showToast, setShowToast] = useState<string | null>(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [speakingSection, setSpeakingSection] = useState<"exec" | "sentiment" | null>(null);
+  const [submittedInput, setSubmittedInput] = useState("");
+  const [fullSubmittedInput, setFullSubmittedInput] = useState("");
+  const [inputExpanded, setInputExpanded] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -78,36 +88,186 @@ export default function TextPulseApp() {
     };
   }, []);
 
-  const handleSpeak = (section: "exec" | "sentiment", text: string) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      triggerToast("Text-to-speech is not supported in this browser.");
-      return;
-    }
-
+  const handleSpeak = async (section: "exec" | "sentiment", text: string) => {
     if (speakingSection === section) {
-      window.speechSynthesis.cancel();
       setSpeakingSection(null);
       return;
     }
 
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 0.95;
-    utterance.pitch = 1.0;
-
-    utterance.onend = () => setSpeakingSection(null);
-    utterance.onerror = () => setSpeakingSection(null);
-
     setSpeakingSection(section);
-    window.speechSynthesis.speak(utterance);
     triggerToast(`Reading ${section === "exec" ? "Executive Summary" : "Sentiment Summary"} aloud...`);
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/v1/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: text,
+          language: currentPreset.language,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`TTS failed with status ${res.status}`);
+      }
+    } catch (err: any) {
+      triggerToast(`Speech Error: ${err.message || "Failed to trigger backend speech"}`);
+    } finally {
+      setSpeakingSection(null);
+    }
+  };
+
+  const includeSummary = true;
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+
+  const parseBackendResponse = (data: any, defaultFilename: string = "analyzed_text.txt") => {
+    const overall = data.overall_sentiment || {};
+    // Emotions live in overall_sentiment.emotions, not a top-level emotion_distribution field
+    const emotionDist: Record<string, number> = overall.emotions || {};
+    const metadata = data.metadata || {};
+
+    const dominantEmo = overall.dominant_emotion
+      ? overall.dominant_emotion.charAt(0).toUpperCase() + overall.dominant_emotion.slice(1)
+      : "Neutral";
+
+    const polScore = typeof overall.polarity_score === "number" ? overall.polarity_score : 0;
+    const polProgress = Math.min(100, Math.max(0, Math.round((polScore + 1) * 50)));
+
+    const sortedEmotions = Object.entries(emotionDist)
+      .sort(([, a], [, b]) => (b as number) - (a as number))
+      .slice(0, 4);
+
+    const colors = ["bg-emerald-500", "bg-[#718b76]", "bg-[#475569]", "bg-[#cbd5e1]"];
+    const breakdown = sortedEmotions.map(([name, val], idx) => ({
+      name: name.charAt(0).toUpperCase() + name.slice(1),
+      isPrimary: idx === 0,
+      percent: Math.round((val as number) * 100),
+      color: colors[idx % colors.length],
+    }));
+
+    if (breakdown.length === 0) {
+      breakdown.push({ name: dominantEmo, isPrimary: true, percent: Math.round((overall.confidence || 0.5) * 100), color: "bg-emerald-500" });
+    }
+
+    const languageDisplay = metadata.language === "hi" ? "Hindi (hi)" : "English (en)";
+
+    // Split the Llama output on section markers so each card gets its own part.
+    // The entire model output goes into Executive Summary.
+    // Strip only the leading "Summary:" / "सारांश:" prefix if present.
+    const summaryPrefixRe = /^(सारांश\s*:|summary\s*:)\s*/i;
+
+    let execSummaryText = data.summary
+      ? data.summary.replace(summaryPrefixRe, "").trim()
+      : "No summary available. The model returned only numeric sentiment scores.";
+
+    // Sentiment summary: concise computed line from the model scores.
+    let sentimentSummaryText = `The sentiment is classified as ${overall.polarity_description || "neutral"} with ${overall.intensity_description || "moderate"} intensity. Primary emotion: ${dominantEmo} (Confidence: ${Math.round((overall.confidence || 0) * 100)}%).`;
+
+    return {
+      id: data.request_id || "res_" + Date.now(),
+      title: "Real-time Sentiment Analysis",
+      filename: defaultFilename,
+      language: languageDisplay,
+      dominantEmotion: dominantEmo,
+      emotionColor: "bg-purple-100 text-purple-700 border-purple-200",
+      polarity: overall.polarity_description ? overall.polarity_description.charAt(0).toUpperCase() + overall.polarity_description.slice(1) : "Neutral",
+      polarityProgress: polProgress,
+      sentiment: overall.polarity_description ? overall.polarity_description.toUpperCase() : "NEUTRAL",
+      sentimentColor: polScore > 0.1 ? "text-emerald-600" : polScore < -0.1 ? "text-red-600" : "text-slate-600",
+      execSummary: execSummaryText,
+      sentimentSummary: sentimentSummaryText,
+      aiNote: `Analyzed via ${metadata.model_version || "MultiTaskSentimentEngine"} on ${metadata.device || "CPU/GPU"}.`,
+      breakdown,
+      meta: {
+        coherence: "High",
+        clarity: "High",
+        intent: metadata.language === "hi" ? "Hindi Text" : "English Text",
+      },
+    };
+  };
+
+  const startStepTimers = () => {
+    // Clear any previous timers
+    stepTimersRef.current.forEach(clearTimeout);
+    setCurrentStep(0);
+    stepTimersRef.current = [
+      setTimeout(() => setCurrentStep(1), 2500),  // Extraction done → inference running
+      setTimeout(() => setCurrentStep(2), 8000),  // Inference done → summary generating
+    ];
+  };
+
+  const processTextWithBackend = async (textToAnalyze: string, summarize: boolean) => {
+    setIsAnalyzing(true);
+    startStepTimers();
+    const fullText = textToAnalyze;
+    setFullSubmittedInput(fullText);
+    setInputExpanded(false);
+    setSubmittedInput(textToAnalyze.length > 60 ? textToAnalyze.substring(0, 57) + "..." : textToAnalyze);
+    if (!hasSubmitted) setHasSubmitted(true);
+
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/v1/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: textToAnalyze,
+          summarize: summarize,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`API returned HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setCurrentPreset(parseBackendResponse(data, "custom_input.txt"));
+      triggerToast("Analysis completed successfully!");
+    } catch (err: any) {
+      triggerToast(`Analysis Error: ${err.message || "Failed to reach backend"}`);
+    } finally {
+      stepTimersRef.current.forEach(clearTimeout);
+      setIsAnalyzing(false);
+      setCurrentStep(0);
+    }
+  };
+
+  const processFileWithBackend = async (file: File, summarize: boolean) => {
+    setIsAnalyzing(true);
+    startStepTimers();
+    setFullSubmittedInput(file.name);
+    setInputExpanded(false);
+    setSubmittedInput(file.name);
+    if (!hasSubmitted) setHasSubmitted(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("summarize", summarize.toString());
+
+      const res = await fetch("http://127.0.0.1:8000/api/v1/analyze_file", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        throw new Error(`API returned HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setCurrentPreset(parseBackendResponse(data, file.name));
+      triggerToast(`Analysis completed for ${file.name}!`);
+    } catch (err: any) {
+      triggerToast(`File Analysis Error: ${err.message || "Failed to parse file"}`);
+    } finally {
+      stepTimersRef.current.forEach(clearTimeout);
+      setIsAnalyzing(false);
+      setCurrentStep(0);
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setUploadedFile(file);
-      triggerAnalysis(file.name);
+      processFileWithBackend(file, includeSummary);
     }
   };
 
@@ -116,21 +276,8 @@ export default function TextPulseApp() {
     const file = e.dataTransfer.files?.[0];
     if (file) {
       setUploadedFile(file);
-      triggerAnalysis(file.name);
+      processFileWithBackend(file, includeSummary);
     }
-  };
-
-  const triggerAnalysis = (name?: string) => {
-    setIsAnalyzing(true);
-    if (!hasSubmitted) {
-      setHasSubmitted(true);
-    }
-
-    setTimeout(() => {
-      setIsAnalyzing(false);
-      const displayName = name || "uploaded_document.pdf";
-      triggerToast(`Analysis updated for ${displayName}`);
-    }, 600);
   };
 
   const handlePasteSubmit = () => {
@@ -138,16 +285,7 @@ export default function TextPulseApp() {
       triggerToast("Please type or paste text to analyze.");
       return;
     }
-
-    setIsAnalyzing(true);
-    if (!hasSubmitted) {
-      setHasSubmitted(true);
-    }
-
-    setTimeout(() => {
-      setIsAnalyzing(false);
-      triggerToast("Text analysis generated successfully.");
-    }, 600);
+    processTextWithBackend(customText, includeSummary);
   };
 
   const exportReport = (format: "pdf" | "json") => {
@@ -220,15 +358,16 @@ export default function TextPulseApp() {
         </div>
       )}
 
-      {/* TOP NAVIGATION BAR (Clean - No Notification Bell, No User Login, No History) */}
-      <header className="bg-white border-b border-slate-200/80 sticky top-0 z-40">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          {/* Brand Logo */}
+      {/* TOP NAVIGATION BAR */}
+      <header className="bg-white border-b border-slate-100 sticky top-0 z-40">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center">
+          {/* Brand Logo & Info */}
           <div
             onClick={() => setHasSubmitted(false)}
-            className="flex items-center gap-3 cursor-pointer group"
+            className="flex items-center gap-3.5 cursor-pointer group"
           >
-            <div className="w-9 h-9 rounded-xl bg-emerald-50 border border-emerald-200/70 flex items-center justify-center text-emerald-600 shadow-2xs group-hover:scale-105 transition-transform">
+            {/* Logo: Blue rounded square icon with white document inside */}
+            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-sm shrink-0 transition-transform group-hover:scale-[1.02]">
               <svg
                 width="20"
                 height="20"
@@ -239,17 +378,18 @@ export default function TextPulseApp() {
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >
-                <path d="M4 12h3l2-5 4 10 2-5h5" />
+                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                <polyline points="14 2 14 8 20 8" />
               </svg>
             </div>
-            <span className="text-xl font-bold tracking-tight text-slate-900">
-              Text<span className="text-emerald-600">Pulse</span>
-            </span>
-          </div>
-
-          {/* Title */}
-          <div className="text-sm font-semibold text-slate-500">
-            Multilingual Sentiment & Emotion Analysis
+            <div className="flex flex-col">
+              <span className="text-lg font-bold tracking-tight text-slate-800 leading-tight">
+                InsightHub
+              </span>
+              <span className="text-[11px] text-slate-400 font-semibold tracking-wide mt-0.5">
+                AI-powered document analysis
+              </span>
+            </div>
           </div>
         </div>
       </header>
@@ -259,374 +399,414 @@ export default function TextPulseApp() {
         <div className="flex-1 flex flex-col justify-between space-y-8">
           {/* INITIAL GREETING (Shown before first submission) */}
           {!hasSubmitted && (
-            <div className="text-center my-auto space-y-3 py-6 animate-in fade-in duration-500">
-              <div className="inline-flex items-center gap-2 px-3 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold rounded-full mb-2">
-                <Sparkles className="w-3.5 h-3.5" /> TextPulse Sentiment Engine
-              </div>
-              <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight">
-                What text would you like to analyze today?
+            <div className="text-center my-auto space-y-3.5 py-12 animate-in fade-in duration-500">
+              <h1 className="text-3xl sm:text-4xl font-bold text-slate-800 tracking-tight">
+                How can InsightHub help you today?
               </h1>
-              <p className="text-slate-500 text-sm sm:text-base max-w-lg mx-auto">
-                Type or paste text below, or upload a document to generate analysis.
+              <p className="text-slate-400 text-sm sm:text-base font-medium max-w-xl mx-auto">
+                Analyze documents, extract summaries, and understand sentiment in seconds.
               </p>
             </div>
           )}
 
-          {/* OUTPUT SECTION: ANALYSIS OVERVIEW (Displayed after input submission) */}
+          {/* OUTPUT SECTION */}
           {hasSubmitted && (
             <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-500 pb-36">
-              {/* SECTION HEADER WITH SHARE & DOWNLOAD */}
-              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-                  Analysis Overview
-                </h2>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowShareModal(true)}
-                    className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 rounded-lg transition-colors"
-                    title="Share Analysis"
-                  >
-                    <Share2 className="w-5 h-5" />
-                  </button>
-                  <button
-                    onClick={() => exportReport("json")}
-                    className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 rounded-lg transition-colors"
-                    title="Download Report"
-                  >
-                    <Download className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
-
-              {/* 4 TOP METRIC CARDS */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Card 1: LANGUAGE */}
-                <div className="bg-white p-4 rounded-2xl shadow-2xs border border-slate-200/70 flex items-center gap-3.5">
-                  <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 shrink-0">
-                    <Globe className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-[10px] sm:text-[11px] font-bold tracking-wider text-slate-400 uppercase">
-                      LANGUAGE
-                    </div>
-                    <div className="text-sm sm:text-base font-bold text-slate-800">
-                      {currentPreset.language}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Card 2: DOMINANT EMOTION */}
-                <div className="bg-white p-4 rounded-2xl shadow-2xs border border-slate-200/70 flex items-center gap-3.5">
-                  <div className="w-10 h-10 rounded-full bg-purple-50 flex items-center justify-center text-purple-600 shrink-0">
-                    <Frown className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-[10px] sm:text-[11px] font-bold tracking-wider text-slate-400 uppercase mb-0.5">
-                      DOMINANT EMOTION
-                    </div>
-                    <div>
-                      <span
-                        className={`inline-block px-3 py-0.5 rounded-full text-xs font-medium ${currentPreset.emotionColor}`}
+              {/* User Prompt / Input bubble with expand on click */}
+              <div className="flex justify-end">
+                <div
+                  className={`group relative bg-blue-50/50 border border-blue-200/50 text-slate-800 px-5 py-2.5 rounded-2xl max-w-md text-sm font-medium shadow-2xs transition-all duration-300 ${
+                    fullSubmittedInput.length > 60 ? "cursor-pointer select-none" : ""
+                  }`}
+                  onClick={() => {
+                    if (fullSubmittedInput.length > 60) setInputExpanded((p) => !p);
+                  }}
+                >
+                  <p className={`whitespace-pre-wrap break-words transition-all duration-300 ${
+                    inputExpanded ? "" : "line-clamp-2"
+                  }`}>
+                    {fullSubmittedInput || "..."}
+                  </p>
+                  {fullSubmittedInput.length > 60 && (
+                    <div className={`flex justify-center mt-1.5 text-blue-400 transition-all duration-300 ${
+                      inputExpanded ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    }`}>
+                      <svg
+                        className={`w-4 h-4 transition-transform duration-300 ${inputExpanded ? "rotate-180" : ""}`}
+                        fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
                       >
-                        {currentPreset.dominantEmotion}
-                      </span>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                      </svg>
                     </div>
-                  </div>
-                </div>
-
-                {/* Card 3: POLARITY */}
-                <div className="bg-white p-4 rounded-2xl shadow-2xs border border-slate-200/70 flex items-center gap-3.5">
-                  <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 shrink-0">
-                    <Scale className="w-5 h-5" />
-                  </div>
-                  <div className="flex-1">
-                    <div className="text-[10px] sm:text-[11px] font-bold tracking-wider text-slate-400 uppercase mb-1">
-                      POLARITY
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-12 h-1.5 bg-slate-200 rounded-full overflow-hidden">
-                        <div
-                          className="bg-slate-700 h-full rounded-full transition-all duration-500"
-                          style={{ width: `${currentPreset.polarityProgress}%` }}
-                        />
-                      </div>
-                      <span className="text-xs sm:text-sm font-bold text-slate-800">
-                        {currentPreset.polarity}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Card 4: SENTIMENT */}
-                <div className="bg-white p-4 rounded-2xl shadow-2xs border border-slate-200/70 flex items-center gap-3.5">
-                  <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center text-red-500 shrink-0">
-                    <TrendingDown className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-[10px] sm:text-[11px] font-bold tracking-wider text-slate-400 uppercase">
-                      SENTIMENT
-                    </div>
-                    <div className={`text-sm sm:text-base font-bold ${currentPreset.sentimentColor}`}>
-                      {currentPreset.sentiment}
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
 
-              {/* TWO COLUMN SUMMARIES WITH READ ALOUD AUDIO BUTTONS */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Executive Summary Card */}
-                <div className="bg-white p-6 sm:p-7 rounded-2xl shadow-2xs border border-slate-200/70 flex flex-col justify-between space-y-4">
-                  <div>
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-lg font-bold text-slate-900">
-                          Executive Summary
-                        </h3>
+              {/* ── LOADING STATE ── shown while backend is processing */}
+              {isAnalyzing && (
+                <div className="space-y-4 animate-in fade-in duration-300">
+                  {/* Status pill */}
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                    <span className="text-sm font-semibold text-slate-500">
+                      InsightHub is analyzing your input&hellip;
+                    </span>
+                  </div>
 
-                        {/* Read Aloud Button */}
-                        <button
-                          onClick={() => handleSpeak("exec", currentPreset.execSummary)}
-                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
-                            speakingSection === "exec"
-                              ? "bg-emerald-600 text-white animate-pulse"
-                              : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200"
-                          }`}
-                          title="Read Executive Summary Aloud"
-                        >
-                          {speakingSection === "exec" ? (
-                            <>
-                              <VolumeX className="w-3.5 h-3.5" /> Stop
-                            </>
-                          ) : (
-                            <>
-                              <Volume2 className="w-3.5 h-3.5" /> Read Aloud
-                            </>
-                          )}
-                        </button>
+                  {/* Skeleton: Executive Summary card */}
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs space-y-3 animate-pulse">
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="h-5 w-44 bg-slate-100 rounded-lg" />
+                      <div className="h-5 w-20 bg-slate-100 rounded-full" />
+                      <div className="h-5 w-16 bg-slate-100 rounded-full" />
+                    </div>
+                    <div className="h-3 w-full bg-slate-100 rounded" />
+                    <div className="h-3 w-5/6 bg-slate-100 rounded" />
+                    <div className="h-3 w-4/6 bg-slate-100 rounded" />
+                    <div className="h-3 w-3/4 bg-slate-100 rounded" />
+                  </div>
+
+                  {/* Skeleton: Two-column row */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Skeleton: Sentiment card */}
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs animate-pulse space-y-4 min-h-[200px]">
+                      <div className="h-5 w-36 bg-slate-100 rounded-lg mb-6" />
+                      <div className="grid grid-cols-3 gap-3">
+                        {[0, 1, 2].map((i) => (
+                          <div key={i} className="flex flex-col items-center gap-2">
+                            <div className="h-6 w-16 bg-slate-100 rounded-full" />
+                            <div className="h-8 w-12 bg-slate-100 rounded" />
+                          </div>
+                        ))}
                       </div>
-                      <FileText className="w-5 h-5 text-slate-400" />
-                    </div>
-
-                    <p className="text-slate-600 text-sm leading-relaxed">
-                      {currentPreset.execSummary}
-                    </p>
-                  </div>
-
-                  {/* PulseAI Banner */}
-                  <div className="bg-slate-100/80 rounded-xl p-3.5 flex items-start gap-3 border border-slate-200/50">
-                    <div className="w-5 h-5 rounded-full bg-teal-100 border border-teal-300 text-teal-700 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
-                      i
-                    </div>
-                    <p className="text-xs text-slate-600 leading-snug">
-                      {currentPreset.aiNote}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Sentiment Summary Card */}
-                <div className="bg-white p-6 sm:p-7 rounded-2xl shadow-2xs border border-slate-200/70 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-lg font-bold text-slate-900">
-                          Sentiment Summary
-                        </h3>
-
-                        {/* Read Aloud Button */}
-                        <button
-                          onClick={() => handleSpeak("sentiment", currentPreset.sentimentSummary)}
-                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
-                            speakingSection === "sentiment"
-                              ? "bg-rose-600 text-white animate-pulse"
-                              : "bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200"
-                          }`}
-                          title="Read Sentiment Summary Aloud"
-                        >
-                          {speakingSection === "sentiment" ? (
-                            <>
-                              <VolumeX className="w-3.5 h-3.5" /> Stop
-                            </>
-                          ) : (
-                            <>
-                              <Volume2 className="w-3.5 h-3.5" /> Read Aloud
-                            </>
-                          )}
-                        </button>
+                      <div className="space-y-2 mt-auto pt-4">
+                        <div className="h-3 w-full bg-slate-100 rounded" />
+                        <div className="h-2 w-full bg-slate-100 rounded-full" />
                       </div>
-                      <Frown className="w-5 h-5 text-red-400" />
                     </div>
 
-                    <p className="text-slate-600 text-sm leading-relaxed">
-                      {currentPreset.sentimentSummary}
-                    </p>
+                    {/* Skeleton: Emotion breakdown card */}
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs animate-pulse space-y-4 min-h-[200px]">
+                      <div className="h-5 w-40 bg-slate-100 rounded-lg mb-6" />
+                      {[0, 1, 2].map((i) => (
+                        <div key={i} className="h-10 w-full bg-slate-100 rounded-xl" />
+                      ))}
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              {/* EMOTIONAL TONE BREAKDOWN CARD */}
-              <div className="bg-white p-6 sm:p-7 rounded-2xl shadow-2xs border border-slate-200/70 space-y-6">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900">
-                    Emotional Tone Breakdown
-                  </h3>
-                  <BarChart2 className="w-5 h-5 text-slate-400" />
-                </div>
-
-                {/* Progress Items */}
-                <div className="space-y-4">
-                  {currentPreset.breakdown.map((item, idx) => (
-                    <div key={idx} className="space-y-1.5">
-                      <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
-                        <div className="flex items-center gap-2">
-                          <span>{item.name}</span>
-                          {item.isPrimary && (
-                            <span className="border border-red-300 text-red-500 bg-red-50/40 text-[9px] px-1.5 py-0.2 rounded uppercase font-bold tracking-wider">
-                              PRIMARY
-                            </span>
-                          )}
+                  {/* Progress steps */}
+                  <div className="flex items-center gap-6 px-1">
+                    {["Extracting text", "Running model inference", "Generating summary"].map((step, i) => {
+                      const isActive = i === currentStep;
+                      const isDone = i < currentStep;
+                      return (
+                        <div key={i} className="flex items-center gap-2">
+                          <div className={`w-1.5 h-1.5 rounded-full transition-colors duration-500 ${
+                            isDone
+                              ? "bg-blue-400"
+                              : isActive
+                              ? "bg-blue-500 animate-pulse"
+                              : "bg-slate-200"
+                          }`} />
+                          <span className={`text-xs font-medium transition-colors duration-500 ${
+                            isDone
+                              ? "text-blue-400"
+                              : isActive
+                              ? "text-blue-600"
+                              : "text-slate-400"
+                          }`}>{step}</span>
                         </div>
-                        <span className="text-slate-500">{item.percent}%</span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ── RESULTS STATE ── only shown once backend response is ready */}
+              {!isAnalyzing && (
+                <>
+              {/* Executive Summary Card */}
+              <div className="bg-white p-6 sm:p-7 rounded-2xl shadow-xs border border-slate-200/80 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <h3 className="text-lg sm:text-xl font-bold text-slate-800">
+                      Executive summary
+                    </h3>
+                    <button
+                      onClick={() => handleSpeak("exec", currentPreset.execSummary)}
+                      className={`p-1 rounded-lg transition-colors ${
+                        speakingSection === "exec"
+                          ? "bg-blue-100 text-blue-600 animate-pulse"
+                          : "text-slate-400 hover:text-slate-600 hover:bg-slate-50"
+                      }`}
+                      title="Read aloud"
+                    >
+                      <Volume2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="bg-blue-50 text-blue-700 border border-blue-100/50 px-2.5 py-0.5 rounded-full text-xs font-semibold">
+                      {currentPreset.language}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-slate-600 text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words">
+                  {currentPreset.execSummary}
+                </p>
+              </div>
+
+              {/* Two Columns Section: Sentiment Analysis & Emotion Breakdown */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Column 1: Sentiment Analysis */}
+                <div className="bg-white p-6 sm:p-7 rounded-2xl shadow-xs border border-slate-200/80 flex flex-col justify-between min-h-[300px]">
+                  <div>
+                    <div className="flex items-center gap-2.5 mb-6">
+                      <h3 className="text-lg font-bold text-slate-800">
+                        Sentiment analysis
+                      </h3>
+                      <button
+                        onClick={() => handleSpeak("sentiment", currentPreset.sentimentSummary)}
+                        className={`p-1 rounded-lg transition-colors ${
+                          speakingSection === "sentiment"
+                            ? "bg-blue-100 text-blue-600 animate-pulse"
+                            : "text-slate-400 hover:text-slate-600 hover:bg-slate-50"
+                        }`}
+                        title="Read aloud"
+                      >
+                        <Volume2 className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Three Sentiment Pillars */}
+                    <div className="grid grid-cols-3 gap-3 text-center mb-6">
+                      {/* Positive */}
+                      <div className="flex flex-col items-center">
+                        <span className="bg-emerald-500 text-white px-3.5 py-1 rounded-full text-[10px] font-bold tracking-wide uppercase shadow-2xs">
+                          Positive
+                        </span>
+                        <span className="text-2xl sm:text-3xl font-extrabold text-emerald-500 mt-2">
+                          {Math.round(currentPreset.polarityProgress > 50 ? currentPreset.polarityProgress : Math.max(0, currentPreset.polarityProgress * 1.2))}%
+                        </span>
                       </div>
-                      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div
-                          className={`${item.color} h-full rounded-full transition-all duration-700`}
-                          style={{ width: `${item.percent}%` }}
-                        />
+
+                      {/* Neutral */}
+                      <div className="flex flex-col items-center">
+                        <span className="bg-slate-300 text-slate-700 px-3.5 py-1 rounded-full text-[10px] font-bold tracking-wide uppercase shadow-2xs">
+                          Neutral
+                        </span>
+                        <span className="text-2xl sm:text-3xl font-extrabold text-slate-400 mt-2">
+                          {Math.round(100 - (currentPreset.polarityProgress > 50 ? currentPreset.polarityProgress : Math.max(0, currentPreset.polarityProgress * 1.2)) - (currentPreset.polarityProgress < 50 ? (100 - currentPreset.polarityProgress) : Math.max(0, (100 - currentPreset.polarityProgress) * 0.8)))}%
+                        </span>
+                      </div>
+
+                      {/* Negative */}
+                      <div className="flex flex-col items-center">
+                        <span className="bg-red-600 text-white px-3.5 py-1 rounded-full text-[10px] font-bold tracking-wide uppercase shadow-2xs">
+                          Negative
+                        </span>
+                        <span className="text-2xl sm:text-3xl font-extrabold text-red-600 mt-2">
+                          {Math.round(currentPreset.polarityProgress < 50 ? (100 - currentPreset.polarityProgress) : Math.max(0, (100 - currentPreset.polarityProgress) * 0.8))}%
+                        </span>
                       </div>
                     </div>
-                  ))}
+                  </div>
+
+                  {/* Overall Sentiment Progress bar */}
+                  <div className="space-y-2 mt-auto">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-slate-500">
+                        Overall sentiment score
+                      </span>
+                      <span className="text-lg font-bold text-blue-600">
+                        {Math.round(currentPreset.polarityProgress)}%
+                      </span>
+                    </div>
+                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-blue-500 to-emerald-400 rounded-full transition-all duration-500"
+                        style={{ width: `${Math.round(currentPreset.polarityProgress)}%` }}
+                      />
+                    </div>
+                  </div>
                 </div>
 
-                {/* Bottom 3 Meta Metric Pills */}
-                <div className="grid grid-cols-3 gap-3 pt-2">
-                  <div className="bg-slate-100/70 p-3 rounded-xl text-center">
-                    <div className="text-[10px] font-bold tracking-wider text-slate-400 uppercase">
-                      COHERENCE
-                    </div>
-                    <div className="text-xs font-bold text-slate-800 mt-1">
-                      {currentPreset.meta.coherence}
-                    </div>
-                  </div>
-                  <div className="bg-slate-100/70 p-3 rounded-xl text-center">
-                    <div className="text-[10px] font-bold tracking-wider text-slate-400 uppercase">
-                      CLARITY
-                    </div>
-                    <div className="text-xs font-bold text-slate-800 mt-1">
-                      {currentPreset.meta.clarity}
-                    </div>
-                  </div>
-                  <div className="bg-slate-100/70 p-3 rounded-xl text-center">
-                    <div className="text-[10px] font-bold tracking-wider text-slate-400 uppercase">
-                      INTENT
-                    </div>
-                    <div className="text-xs font-bold text-slate-800 mt-1">
-                      {currentPreset.meta.intent}
+                {/* Column 2: Emotion Breakdown */}
+                <div className="bg-white p-6 sm:p-7 rounded-2xl shadow-xs border border-slate-200/80 space-y-4 flex flex-col justify-between min-h-[300px]">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-800 mb-6">
+                      Emotion breakdown
+                    </h3>
+
+                    {/* Emotion bars */}
+                    <div className="space-y-3.5">
+                      {currentPreset.breakdown.slice(0, 3).map((item, idx) => {
+                        if (idx === 0) {
+                          // Blue themed first row
+                          return (
+                            <div key={idx} className="bg-blue-50/80 border border-blue-100/50 text-blue-800 rounded-xl px-4 py-2.5 flex items-center justify-between font-semibold text-sm">
+                              <span>{item.name}</span>
+                              <div className="flex items-center gap-2">
+                                <span>{item.percent}%</span>
+                                <Smile className="w-4 h-4 text-blue-500" />
+                              </div>
+                            </div>
+                          );
+                        } else if (idx === 1) {
+                          // Teal/green themed second row
+                          return (
+                            <div key={idx} className="bg-slate-50 border border-slate-200/40 text-slate-700 rounded-xl px-4 py-2.5 flex items-center justify-between font-semibold text-sm">
+                              <span>{item.name}</span>
+                              <div className="flex items-center gap-2">
+                                <span>{item.percent}%</span>
+                                <Info className="w-4 h-4 text-teal-600" />
+                              </div>
+                            </div>
+                          );
+                        } else {
+                          // Orange/amber themed third row
+                          return (
+                            <div key={idx} className="bg-slate-50 border border-slate-200/40 text-slate-700 rounded-xl px-4 py-2.5 flex items-center justify-between font-semibold text-sm">
+                              <span>{item.name}</span>
+                              <div className="flex items-center gap-2">
+                                <span>{item.percent}%</span>
+                                <Award className="w-4 h-4 text-amber-500" />
+                              </div>
+                            </div>
+                          );
+                        }
+                      })}
+
+                      {/* No hardcoded fallback rows — real model data fills all slots */}
                     </div>
                   </div>
                 </div>
               </div>
+
+              {/* Action Buttons: Download, Share, Copy */}
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  onClick={() => exportReport("json")}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  title="Download report"
+                >
+                  <Download className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => setShowShareModal(true)}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  title="Share analysis"
+                >
+                  <Share2 className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(
+                      `Executive Summary:\n${currentPreset.execSummary}\n\nSentiment Summary:\n${currentPreset.sentimentSummary}`
+                    );
+                    triggerToast("Copied to clipboard!");
+                  }}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  title="Copy analysis"
+                >
+                  <Copy className="w-5 h-5" />
+                </button>
+              </div>
+              </>
+              )}
             </div>
           )}
 
-          {/* DYNAMIC CHAT INPUT BAR (Clean - NO Demo Presets buttons, slides down Gemini style) */}
-          <div
-            className={`w-full transition-all duration-500 ease-in-out ${
-              hasSubmitted
-                ? "fixed bottom-0 left-0 right-0 p-4 bg-slate-50/90 backdrop-blur-md z-30 border-t border-slate-200/80 max-w-4xl mx-auto shadow-lg rounded-t-3xl"
-                : "relative max-w-3xl mx-auto w-full mb-auto"
-            }`}
-          >
-            <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200/80 space-y-4">
-              {/* Clean Sub-Tabs: Upload Document vs Paste Text (Clean header without demo preset buttons!) */}
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <div className="flex items-center gap-6 text-xs sm:text-sm font-medium">
-                  <button
-                    onClick={() => setInputTab("upload")}
-                    className={`relative pb-1.5 transition-colors ${
-                      inputTab === "upload"
-                        ? "text-emerald-700 font-semibold"
-                        : "text-slate-400 hover:text-slate-600"
-                    }`}
-                  >
-                    Upload Document
-                    {inputTab === "upload" && (
-                      <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-full" />
-                    )}
-                  </button>
-                  <button
-                    onClick={() => setInputTab("paste")}
-                    className={`relative pb-1.5 transition-colors ${
-                      inputTab === "paste"
-                        ? "text-emerald-700 font-semibold"
-                        : "text-slate-400 hover:text-slate-600"
-                    }`}
-                  >
-                    Paste Text
-                    {inputTab === "paste" && (
-                      <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-full" />
-                    )}
-                  </button>
+          {/* ALWAYS-FIXED BOTTOM INPUT BAR */}
+          <div className="fixed bottom-0 left-0 right-0 px-4 pb-3 pt-2 bg-slate-50/90 backdrop-blur-md z-30 border-t border-slate-100 max-w-4xl mx-auto">
+            <div className="bg-white rounded-2xl px-4 py-2.5 shadow-sm border border-slate-200/80">
+              {/* Top row: Text label + char count */}
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-400">
+                  <Keyboard className="w-3.5 h-3.5" />
+                  <span>Text</span>
+                  {uploadedFile && (
+                    <span className="ml-2 text-blue-500 font-medium">
+                      📎 {uploadedFile.name}
+                    </span>
+                  )}
                 </div>
+                <span className="text-[11px] text-slate-300 font-medium">
+                  {uploadedFile
+                    ? `${(uploadedFile.size / 1024).toFixed(1)} KB`
+                    : `${customText.length} chars`}
+                </span>
               </div>
 
-              {/* TAB 1: UPLOAD DOCUMENT */}
-              {inputTab === "upload" && (
-                <div>
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileUpload}
-                    accept=".pdf,.doc,.docx,.txt"
-                    className="hidden"
-                  />
-                  <div
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={handleDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="border-2 border-dashed border-slate-200 hover:border-emerald-500/60 rounded-xl p-6 sm:p-8 flex flex-col items-center justify-center text-center bg-slate-50/40 hover:bg-emerald-50/20 cursor-pointer transition-all group"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 mb-2 group-hover:scale-105 transition-transform">
-                      <FileUp className="w-5 h-5" />
-                    </div>
-                    <p className="text-slate-700 font-semibold text-xs sm:text-sm mb-0.5">
-                      {uploadedFile ? uploadedFile.name : "Drop .pdf, .doc, or .txt here"}
-                    </p>
-                    <p className="text-slate-400 text-[11px]">
-                      {uploadedFile ? "Click to change file" : "Maximum size 10MB"}
-                    </p>
-                  </div>
-                </div>
-              )}
+              {/* Textarea */}
+              <textarea
+                value={customText}
+                onChange={(e) => setCustomText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handlePasteSubmit();
+                  }
+                }}
+                placeholder="Paste text or describe what to analyze..."
+                className="w-full bg-transparent resize-none border-none outline-none focus:ring-0 text-slate-800 text-sm min-h-[44px] max-h-[140px] py-0.5"
+              />
 
-              {/* TAB 2: PASTE TEXT INPUT */}
-              {inputTab === "paste" && (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={customText}
-                    onChange={(e) => setCustomText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handlePasteSubmit();
-                    }}
-                    placeholder="Paste or type text here to analyze..."
-                    className="flex-1 p-3 rounded-xl border border-slate-200 text-slate-800 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
-                  />
-                  <button
-                    onClick={handlePasteSubmit}
-                    disabled={isAnalyzing || !customText.trim()}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-3 rounded-xl font-medium text-xs sm:text-sm flex items-center gap-2 transition-colors disabled:opacity-50 shrink-0"
-                  >
-                    {isAnalyzing ? (
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <>
-                        Analyze <Send className="w-3.5 h-3.5" />
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
+              {/* Hidden file input */}
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+                accept=".pdf,.doc,.docx,.txt"
+                className="hidden"
+              />
+
+              {/* Bottom Row: Paperclip + Send */}
+              <div className="flex items-center justify-between mt-1.5">
+                {/* Paperclip — opens file picker */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    uploadedFile
+                      ? "text-blue-500 bg-blue-50 hover:bg-blue-100"
+                      : "text-slate-400 hover:text-slate-600 hover:bg-slate-50"
+                  }`}
+                  title="Attach file"
+                >
+                  <Paperclip className="w-4 h-4" />
+                </button>
+
+                {/* Circular Send */}
+                <button
+                  onClick={() => {
+                    if (uploadedFile) {
+                      processFileWithBackend(uploadedFile, includeSummary);
+                    } else {
+                      handlePasteSubmit();
+                    }
+                  }}
+                  disabled={
+                    isAnalyzing ||
+                    (!customText.trim() && !uploadedFile)
+                  }
+                  className="w-8 h-8 rounded-full flex items-center justify-center bg-blue-100 text-blue-600 hover:bg-blue-200 disabled:opacity-40 disabled:bg-slate-100 disabled:text-slate-400 transition-colors shrink-0"
+                >
+                  {isAnalyzing ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium px-1 mt-1.5">
+              <span>InsightHub AI can make mistakes. Verify important info.</span>
+              <div className="flex gap-3">
+                <a href="#" className="hover:underline">Terms</a>
+                <a href="#" className="hover:underline">Privacy</a>
+              </div>
             </div>
           </div>
         </div>
@@ -634,3 +814,5 @@ export default function TextPulseApp() {
     </div>
   );
 }
+
+
