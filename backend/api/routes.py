@@ -2,7 +2,7 @@
 FastAPI routes for sentiment analysis API
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Response
 from typing import List, Dict, Any, Optional
 import logging
 import io
@@ -342,23 +342,24 @@ async def analyze_sentiment_stream(request: SentimentRequest):
 
 
 #==============> Voice Configurations <===========
-OUTPUT_FILE = "temp_voice_output.mp3"
 
-async def Speak(text, VOICE, rate, pitch ):
-    com = edge_tts.Communicate(text, VOICE)
-    await com.save(OUTPUT_FILE)
-    os.system(f"mpv --no-video {OUTPUT_FILE}")
-    if os.path.exists(OUTPUT_FILE):
-        os.remove(OUTPUT_FILE)
+async def generate_speech_bytes(text: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz") -> bytes:
+    """Generates MP3 audio bytes in memory without writing to disk or calling local players."""
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    audio_buffer = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_buffer.write(chunk["data"])
+    return audio_buffer.getvalue()
 
 
 @router.post("/speak_summary")
-async def speak_text(request: SpeakRequest):
+async def speak_summary(request: SpeakRequest):
     """
-    Read aloud the text using edge_tts
+    Read aloud the text using edge_tts and stream MP3 bytes directly to the client
     """
     lang = request.language.lower().strip()
-    logger.info(f"🗣️ [/speak] Speech request received for language: {lang}")
+    logger.info(f"🗣️ [/speak_summary] Speech request received for language: {lang}")
     
     if lang == "hi" or "hindi" in lang:
         VOICE = "hi-IN-SwaraNeural"
@@ -366,34 +367,51 @@ async def speak_text(request: SpeakRequest):
         rate = "-0%"
     elif lang == "en" or "english" in lang:
         VOICE = "en-US-AndrewNeural"
-        rate="-15%"
-        pitch="+15Hz"
+        rate = "-15%"
+        pitch = "+15Hz"
     else:
         VOICE = "en-US-AndrewNeural"
+        rate = "-15%"
+        pitch = "+15Hz"
         
     try:
-        await Speak(request.text, VOICE, rate = rate, pitch = pitch)
-        return {"status": "success"}
+        audio_bytes = await generate_speech_bytes(request.text, VOICE, rate=rate, pitch=pitch)
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="Generated audio payload was empty")
+
+        return Response(
+            content=audio_bytes, 
+            media_type="audio/mp3",
+            headers={"Content-Disposition": "inline; filename=summary.mp3"}
+        )
     except Exception as e:
-        logger.error(f"❌ [/speak] Error in Speak: {e}")
+        logger.error(f"❌ [/speak_summary] Error in speech generation: {e}")
         raise HTTPException(status_code=500, detail=f"Speech failed: {str(e)}")
 
+
 @router.post("/speak_sentiment")
-async def speak_text(request: SpeakRequest):
+async def speak_sentiment(request: SpeakRequest):
     """
-    Read aloud the text using edge_tts
+    Read aloud the text using edge_tts and stream MP3 bytes directly to the client
     """
     lang = request.language.lower().strip()
-    logger.info(f"🗣️ [/speak] Speech request received for language: {lang}")
+    logger.info(f"🗣️ [/speak_sentiment] Speech request received for language: {lang}")
     VOICE = "en-US-JennyNeural"
-    rate="-15%"
-    pitch="+15Hz"
+    rate = "-15%"
+    pitch = "+15Hz"
         
     try:
-        await Speak(request.text, VOICE, rate = rate, pitch = pitch)
-        return {"status": "success"}
+        audio_bytes = await generate_speech_bytes(request.text, VOICE, rate=rate, pitch=pitch)
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="Generated audio payload was empty")
+
+        return Response(
+            content=audio_bytes, 
+            media_type="audio/mp3",
+            headers={"Content-Disposition": "inline; filename=sentiment.mp3"}
+        )
     except Exception as e:
-        logger.error(f"❌ [/speak] Error in Speak: {e}")
+        logger.error(f"❌ [/speak_sentiment] Error in speech generation: {e}")
         raise HTTPException(status_code=500, detail=f"Speech failed: {str(e)}")
 
 
