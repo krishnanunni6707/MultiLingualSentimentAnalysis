@@ -28,9 +28,9 @@ from config import APIConfig
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting Multilingual Sentiment Analysis Server...")
+    logger.info("[~] Starting Multilingual Sentiment Analysis Server...")
     yield
-    logger.info("🛑 Shutting down server...")
+    logger.info("[x] Shutting down server...")
 
 
 app = FastAPI(title="Multilingual Sentiment Analysis", lifespan=lifespan)

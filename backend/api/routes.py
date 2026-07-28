@@ -53,8 +53,8 @@ async def analyze_sentiment(request: SentimentRequest) -> DocumentSentimentRespo
     """
     start_time = time.perf_counter()
     text_len = len(request.text) if request.text else 0
-    logger.info(f"📥 [/analyze] Received request (length={text_len} chars, lang={request.language}, summarize={request.summarize})")
-    logger.info(f"📝 [/analyze] Text input content:\n--- START INPUT ---\n{request.text}\n--- END INPUT ---")
+    logger.info(f"[~] [/analyze] Received request (length={text_len} chars, lang={request.language}, summarize={request.summarize})")
+    logger.info(f"[~] [/analyze] Text input content:\n--- START INPUT ---\n{request.text}\n--- END INPUT ---")
 
     try:
         if not request.text or len(request.text.strip()) == 0:
@@ -69,19 +69,19 @@ async def analyze_sentiment(request: SentimentRequest) -> DocumentSentimentRespo
             summarize=request.summarize,
         )
         t_infer = time.perf_counter() - t0
-        logger.info(f"⏱️ [/analyze] Model inference step completed in {t_infer:.3f}s")
+        logger.info(f"[⏱] [/analyze] Model inference step completed in {t_infer:.3f}s")
         
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         
         total_time = time.perf_counter() - start_time
-        logger.info(f"✅ [/analyze] Request processed in {total_time:.3f}s total")
+        logger.info(f"[~] [/analyze] Request processed in {total_time:.3f}s total")
         return result
     
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"❌ [/analyze] Error: {str(e)}")
+        logger.error(f"[✘] [/analyze] Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
@@ -96,14 +96,14 @@ async def analyze_file(
     """
     start_time = time.perf_counter()
     filename = file.filename.lower()
-    logger.info(f"📥 [/analyze_file] Received file '{file.filename}' (summarize={summarize})")
+    logger.info(f"[~] [/analyze_file] Received file '{file.filename}' (summarize={summarize})")
     text = ""
 
     try:
         t0 = time.perf_counter()
         content = await file.read()
         t_read = time.perf_counter() - t0
-        logger.info(f"📄 [/analyze_file] File read into memory ({len(content)} bytes) in {t_read:.3f}s")
+        logger.info(f"[~] [/analyze_file] File read into memory ({len(content)} bytes) in {t_read:.3f}s")
         
         t_extract_start = time.perf_counter()
         if filename.endswith(".txt"):
@@ -132,8 +132,8 @@ async def analyze_file(
             raise HTTPException(status_code=400, detail="Unsupported file format. Please upload .txt, .pdf, or .docx")
 
         t_extract = time.perf_counter() - t_extract_start
-        logger.info(f"🔍 [/analyze_file] Text extraction from {filename} completed in {t_extract:.3f}s (extracted {len(text)} chars)")
-        logger.info(f"📝 [/analyze_file] Extracted text content:\n--- START EXTRACTED TEXT ---\n{text}\n--- END EXTRACTED TEXT ---")
+        logger.info(f"[~] [/analyze_file] Text extraction from {filename} completed in {t_extract:.3f}s (extracted {len(text)} chars)")
+        logger.info(f"[~] [/analyze_file] Extracted text content:\n--- START EXTRACTED TEXT ---\n{text}\n--- END EXTRACTED TEXT ---")
 
         if not text.strip():
             raise HTTPException(status_code=400, detail="No readable text found in the file")
@@ -147,19 +147,19 @@ async def analyze_file(
             summarize=summarize,
         )
         t_infer = time.perf_counter() - t_infer_start
-        logger.info(f"⏱️ [/analyze_file] Model inference step completed in {t_infer:.3f}s")
+        logger.info(f"[⏱] [/analyze_file] Model inference step completed in {t_infer:.3f}s")
         
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         
         total_time = time.perf_counter() - start_time
-        logger.info(f"✅ [/analyze_file] File request processed in {total_time:.3f}s total")
+        logger.info(f"[✔] [/analyze_file] File request processed in {total_time:.3f}s total")
         return result
 
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"❌ [/analyze_file] Error: {str(e)}")
+        logger.error(f"[✘] [/analyze_file] Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
 
 
@@ -344,7 +344,7 @@ async def analyze_sentiment_stream(request: SentimentRequest):
 #==============> Voice Configurations <===========
 OUTPUT_FILE = "temp_voice_output.mp3"
 
-async def Speak(text, VOICE):
+async def Speak(text, VOICE, rate, pitch ):
     com = edge_tts.Communicate(text, VOICE)
     await com.save(OUTPUT_FILE)
     os.system(f"mpv --no-video {OUTPUT_FILE}")
@@ -352,23 +352,45 @@ async def Speak(text, VOICE):
         os.remove(OUTPUT_FILE)
 
 
-@router.post("/speak")
+@router.post("/speak_summary")
 async def speak_text(request: SpeakRequest):
     """
     Read aloud the text using edge_tts
     """
     lang = request.language.lower().strip()
-    logger.info(f"🎙️ [/speak] Speech request received for language: {lang}")
+    logger.info(f"🗣️ [/speak] Speech request received for language: {lang}")
     
     if lang == "hi" or "hindi" in lang:
-        VOICE = "hi-IN-MadhurNeural"
+        VOICE = "hi-IN-SwaraNeural"
+        pitch = "+10Hz"
+        rate = "-0%"
     elif lang == "en" or "english" in lang:
         VOICE = "en-US-AndrewNeural"
+        rate="-15%"
+        pitch="+15Hz"
     else:
         VOICE = "en-US-AndrewNeural"
         
     try:
-        await Speak(request.text, VOICE)
+        await Speak(request.text, VOICE, rate = rate, pitch = pitch)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"❌ [/speak] Error in Speak: {e}")
+        raise HTTPException(status_code=500, detail=f"Speech failed: {str(e)}")
+
+@router.post("/speak_sentiment")
+async def speak_text(request: SpeakRequest):
+    """
+    Read aloud the text using edge_tts
+    """
+    lang = request.language.lower().strip()
+    logger.info(f"🗣️ [/speak] Speech request received for language: {lang}")
+    VOICE = "en-US-JennyNeural"
+    rate="-15%"
+    pitch="+15Hz"
+        
+    try:
+        await Speak(request.text, VOICE, rate = rate, pitch = pitch)
         return {"status": "success"}
     except Exception as e:
         logger.error(f"❌ [/speak] Error in Speak: {e}")

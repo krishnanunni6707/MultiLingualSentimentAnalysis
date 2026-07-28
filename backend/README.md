@@ -1,11 +1,11 @@
-# Multilingual Sentiment Analysis System
+# Backend — Multilingual Sentiment Analysis System
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C.svg)](https://pytorch.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com/)
 [![HuggingFace](https://img.shields.io/badge/🤗-Transformers-FFD21E.svg)](https://huggingface.co/)
 
-A production-ready, dual-language sentiment analysis system for Hindi and English text. Two transformer-based models run in parallel at inference time, their outputs are cross-validated, and an optional Llama summarizer produces emotion-aware summaries.
+**Version:** 2.0.0 · **Last Updated:** July 2026
 
 ---
 
@@ -13,16 +13,16 @@ A production-ready, dual-language sentiment analysis system for Hindi and Englis
 
 - [Overview](#overview)
 - [Pipeline Architecture](#pipeline-architecture)
-- [Models](#models)
-- [Summarization](#summarization)
-- [Training Data](#training-data)
-- [Output Schema](#output-schema)
+- [Model Architecture](#model-architecture)
+- [Reconciliation Engine](#reconciliation-engine)
+- [Output JSON Schema](#output-json-schema)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
+- [Running the Server](#running-the-server)
 - [CLI Usage](#cli-usage)
-- [Training](#training)
-- [REST API](#rest-api)
+- [REST API Reference](#rest-api-reference)
 - [Python API](#python-api)
+- [Training Guide](#training-guide)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
 
@@ -30,269 +30,247 @@ A production-ready, dual-language sentiment analysis system for Hindi and Englis
 
 ## Overview
 
-The system performs **three interconnected sentiment tasks** from a single forward pass:
+The system performs three interconnected sentiment tasks from a **single forward pass** through a shared encoder:
 
-| Task | Type | Output Range | Description |
-|---|---|---|---|
-| **Emotion Classification** | Multi-class / multi-label | 0.0 – 1.0 per class | Probability per emotion label |
-| **Polarity** | Derived regression | −1.0 to +1.0 | Negative ↔ Neutral ↔ Positive |
-| **Intensity** | Derived regression | 0.0 to 1.0 | Weak ↔ Very strong |
+| Task | Type | Output |
+|---|---|---|
+| **Emotion Classification** | Multi-label sigmoid | Probability per emotion ∈ [0, 1] |
+| **Polarity Regression** | Continuous | Score ∈ [−1.0, +1.0] |
+| **Intensity Regression** | Continuous | Score ∈ [0.0, +1.0] |
 
-Default inference models use 7 labels including `neutral`: `anger`, `disgust`, `fear`, `joy`, `neutral`, `sadness`, `surprise`.
+Every request goes through **two independent inference branches** that are then reconciled by `ResultComparator`. This dual-path design catches model-specific failures (e.g., keyword bias in the custom Hindi model) and surfaces them transparently via the `cross_check` field.
 
 ---
 
 ## Pipeline Architecture
 
-### Dual-Path Inference (core flow)
+### Dual-Path Flow
 
 ```
-                  Raw Input Text
-                        │
-              LanguageDetector (langdetect)
-                        │
-          ┌─────────────┴─────────────┐
-          │   PARALLEL EXECUTION      │
-          │                           │
-    Hindi Branch               English Branch
-    (vashuag/HindiEmotion)    (j-hartmann/distilroberta)
-          │                           │
-          │  [Hindi input only]       │
-          │  MarianMT translation ────┘
-          │                           │
-          └────────────┬──────────────┘
-                       │
-                       ▼
-              ResultComparator
-              (per-segment reconcile)
-                       │
-                       ▼
-                OutputAssembler
-                       │
-                       ▼
-              BilingualSummarizer (optional)
-                       │
-                       ▼
-               Final JSON Output
+Raw Input Text
+      │
+      ▼
+LanguageDetector (langdetect)
+      │
+      ├─── language = "hi" ──────────────────────────────────────────┐
+      │                                                               │
+      │    HindiPreprocessor + DocumentSegmenter (danda "।")         │
+      │                                                               │
+      │    Branch A (GPU)                  Branch B (CPU)            │
+      │    ─────────────────               ─────────────────          │
+      │    MultiTaskSentimentModel         Helsinki-NLP/opus-mt-hi-en │
+      │    on raw Devanagari segments      translates → English       │
+      │                                   j-hartmann/distilroberta   │
+      │                                   classifies translated text  │
+      │                                                               │
+      └─── language = "en" ──────────────────────────────────────────┤
+                                                                      │
+           EnglishPreprocessor + DocumentSegmenter (NLTK punkt)      │
+                                                                      │
+           Branch A (CPU)                  Branch B (GPU)            │
+           ─────────────────               ─────────────────          │
+           j-hartmann/distilroberta        MultiTaskSentimentModel    │
+           on raw English segments         on same English segments   │
+           (primary, english_direct)       (cross-check, no translate)│
+                                                                      │
+      ┌───────────────────────────────────────────────────────────────┘
+      │
+      ▼
+ResultComparator.reconcile() — per segment
+      │  • exact_match, valence_match, polarity_proximity
+      │  • Hindi override: if Hindi strongly-negative + EN neutral/pos → use EN
+      ▼
+OutputAssembler.format_full_output()
+      │  • Aggregate segments → overall_sentiment
+      │  • Attach cross_check_summary
+      ▼
+BilingualSummarizer (optional)
+      │  • Llama-3.2-3B-Instruct, 4-bit NF4
+      │  • Emotion-aware prompt injection
+      ▼
+Structured JSON Response
 ```
 
-### Hindi input (`language="hi"`)
-
-1. `HindiPreprocessor` cleans and normalizes Devanagari text.
-2. `DocumentSegmenter` splits on sentence boundaries (Devanagari danda `।`).
-3. **Branch A** — Hindi model runs on raw Hindi segments (primary).
-4. **Branch B** — Segments are translated via `Helsinki-NLP/opus-mt-hi-en`, then the English model runs (cross-check).
-5. `ResultComparator` reconciles with `primary_source: "hindi_direct"`.
-
-### English input (`language="en"`)
-
-1. `EnglishPreprocessor` cleans Latin text.
-2. `DocumentSegmenter` splits on English sentence boundaries.
-3. **Branch A** — English model runs natively (primary, `english_direct`).
-4. **Branch B** — Hindi multilingual model runs on the same English segments (cross-check, no translation).
-5. `ResultComparator` reconciles with `primary_source: "english_direct"`.
-
-### Reconciliation Strategies
-
-| Strategy | Behaviour |
-|---|---|
-| `agreement_flag` *(default)* | Use the language-appropriate primary branch; flag `agreement: false` on valence mismatch |
-| `confidence_weighted_pick` | Pick the branch with higher confidence |
-| `average` | Average emotion probabilities, polarity, intensity, and confidence |
-
-Agreement is evaluated on **valence groups** (positive / negative / neutral), not exact label match. `surprise` is treated as neutral-valence because it is polarity-ambiguous.
-
-### Per-branch processing
+### Segment-Level Processing
 
 ```
-Raw Text
-    │
-    ▼
-Preprocessor (Hindi or English)
-    │
-    ▼
-DocumentSegmenter
-    │
-    ▼
-ModelTokenizer (max_length=512)
-    │
-    ▼
-AutoSequenceClassifierWrapper  OR  MultiTaskSentimentModel
-    │
-    ├── emotion_probabilities  (softmax over labels)
-    ├── polarity_scores        (weighted sum of emotion valences)
-    └── intensity_scores       (1 − P(neutral), or max non-neutral prob)
+Raw segment text
+      │
+      ▼
+ModelTokenizer.batch_encode()  (max_length=512)
+      │
+      ▼
+MultiTaskSentimentModel.forward()
+      │
+      ├── EmotionHead   → sigmoid probabilities per class
+      ├── PolarityHead  → tanh score ∈ [−1, +1]
+      └── IntensityHead → sigmoid score ∈ [0, +1]
+      │
+      ▼
+Context-Aware Balance Gate (inside forward())
+  If positive emotion signal > gate_threshold:
+      polarity ← uplift toward positive
+      (prevents keyword poisoning from negative words in positive text)
+      │
+      ▼
+PolarityPivotAdjuster.adjust()
+  Detects pivot conjunctions: "but", "however", "लेकिन", "परंतु"
+  Shifts sentiment weight to post-pivot clause
+      │
+      ▼
+AutoSequenceClassifierWrapper (for HuggingFace models only)
+  • Temperature smoothing (T=1.2)
+  • Ambiguity gate: if max_conf < 0.45 → pull polarity 70% to neutral
 ```
 
 ---
 
-## Models
+## Model Architecture
 
-### Inference (default)
-
-When no custom checkpoint is provided, `models/model_utils.py` loads pretrained HuggingFace classifiers from the **local cache** (`local_files_only=True`):
-
-| Path | Model | Labels |
-|---|---|---|
-| Hindi | `vashuag/HindiEmotion` | anger, disgust, fear, joy, neutral, sadness, surprise |
-| English | `j-hartmann/emotion-english-distilroberta-base` | anger, disgust, fear, joy, neutral, sadness, surprise |
-| Translation | `Helsinki-NLP/opus-mt-hi-en` | MarianMT seq2seq, beam search, CPU by default |
-
-Both classifiers are wrapped in `AutoSequenceClassifierWrapper`:
-
-- **Logit temperature smoothing** (`temperature=1.2`) prevents over-confident predictions on isolated emotion words.
-- **Polarity** is derived as a weighted dot product of emotion probabilities and per-label valence signs.
-- **Intensity** is `1.0 − P(neutral)` when a neutral label exists; otherwise the max non-neutral probability.
-- **Ambiguity gate** — when max class confidence &lt; 0.45, polarity is pulled 70% toward neutral.
-
-### Training (custom checkpoints)
-
-Training uses `MultiTaskSentimentModel` — a shared transformer encoder with three dedicated heads:
-
-| Language | Base Encoder | Training Data |
-|---|---|---|
-| Hindi | `distilbert-base-multilingual-cased` | EmoInHindi CSV |
-| English | `bert-base-uncased` | GoEmotions (HuggingFace `datasets`) |
+### MultiTaskSentimentModel
 
 ```
 Input: CLS pooled representation [batch, 768]
-                           │
-    ┌──────────────────────|────────────────────┐
-    │                      │                    │
-    ▼                      ▼                    ▼
-EmotionHead          PolarityHead         IntensityHead
-  Linear(768→64)      Linear(768→16)       Linear(768→16)
-  ReLU + Dropout      ReLU + Dropout       ReLU + Dropout
-  Linear(64→N)        Linear(16→1)         Linear(16→1)
-  Sigmoid per class   Tanh → [-1, 1]       Sigmoid → [0, 1]
-  Loss : BCE          Loss : MSE           Loss : MSE
+                     │
+     ┌───────────────┼───────────────┐
+     │               │               │
+     ▼               ▼               ▼
+EmotionHead      PolarityHead    IntensityHead
+ Linear(768→64)   Linear(768→16)  Linear(768→16)
+ ReLU             ReLU            ReLU
+ Dropout(0.1)     Dropout(0.1)    Dropout(0.1)
+ Linear(64→N)     Linear(16→1)    Linear(16→1)
+ Sigmoid          Tanh → [-1,1]   Sigmoid → [0,1]
+ Loss: BCE        Loss: MSE       Loss: MSE
 ```
 
-### Why BCE and MSE 
-In Emotion:  Emotions are classified not predicted.
-That is each emotions are classified "true/false" or "yes/no"
-soo we need to find the Binary loss(BCE).
+**Why BCE for emotions?** Each emotion is an independent binary question (is this text angry? is this text joyful?). BCE treats each label independently rather than forcing one winner via softmax.
 
-In Polarity and Intensity Head: These values are preddicted for each segments.
-So the regression is used so we need to get the prediction loss
-there for w using the Mean squared Error(MSE).
+**Why MSE for polarity/intensity?** These are continuous regression targets. MSE penalizes deviation from the true score proportionally.
 
-**Loss function** (`MultiTaskLoss`):
-
+**Training loss:**
 ```
-L_total = w_emo × BCE(emotion_logits, emotion_labels)
-        + w_pol × MSE(polarity_scores, polarity_labels)
-        + w_int × MSE(intensity_scores, intensity_labels)
-
-Default weights: w_emo=1.0, w_pol=0.8, w_int=0.8
+L_total = 5.0 × BCE(emotion_logits, emotion_labels)
+        + 0.8 × MSE(polarity_scores, polarity_labels)
+        + 0.8 × MSE(intensity_scores, intensity_labels)
 ```
 
-`load_model()` auto-detects checkpoint type: `MultiTaskSentimentModel` state dicts (keys like `encoder.*`, `emotion_head.*`) vs. plain sequence-classification weights.
-
-Checkpoint search order for English: `checkpoints/en/best_model.pt` → `EngModel/model/final_model.pt`.
+The emotion weight is set high (5.0) because multi-label emotion prediction is sparse — most labels are zero, so the signal is weaker and needs amplification.
 
 ---
 
-## Summarization
+## Reconciliation Engine
 
-After sentiment analysis, `BilingualSummarizer` (`multilingual_summarizer/summarizer.py`) optionally generates an abstractive summary.
+`inference/comparator.py` — `ResultComparator.reconcile()`
 
-| Property | Value |
+### Agreement Criteria (any one = agreed)
+| Criterion | Check |
 |---|---|
-| Model | `meta-llama/Llama-3.2-3B-Instruct` |
-| Auth | `HF_TOKEN` in `.env` |
-| Quantization | 4-bit NF4 on CUDA (via `bitsandbytes`) |
-| Languages | English and Hindi (Devanagari ratio heuristic) |
-| Context injection | Dominant emotion + intensity passed as tone context |
+| Exact match | `hindi_label == english_label` |
+| Valence match | Both map to same group: positive/negative/neutral |
+| Polarity proximity | `|hindi_polarity − english_polarity| ≤ 0.20` |
 
-The pipeline adapts sentiment JSON via `adapt_sentiment_output_to_summarizer()` before calling the summarizer. Long texts (&gt; 3500 tokens) use hierarchical chunk-and-merge summarization.
+`surprise` is mapped to **neutral** valence — it is polarity-ambiguous (can be wonder or shock) and systematically caused false mismatches when treated as positive.
 
-Response fields:
+When secondary branch confidence < 0.50, the polarity proximity threshold widens to 0.35 (lenient gate).
 
-| Field | Values |
+### Strategies
+
+| Strategy | Behaviour |
 |---|---|
-| `summary` | Generated text, or `null` if summarizer unavailable |
-| `summarizer_status` | `active` \| `disabled` |
+| `agreement_flag` *(default)* | Use language-appropriate primary branch; apply Hindi override rule when needed |
+| `confidence_weighted_pick` | Pick whichever branch has higher confidence |
+| `average` | Average emotion probs, polarity, intensity, confidence across branches |
 
-Summarizer initialization failure is non-fatal — sentiment analysis continues without it.
+### Hindi Override Rule (v2.0)
+
+The custom Hindi model can misclassify positive/grateful text as strongly negative due to keyword bias (limited training data). When all of these are true simultaneously, the English translated branch is used as primary instead:
+
+```
+hindi_valence == "negative"
+AND hindi polarity_score < −0.5
+AND hindi confidence > 0.85
+AND english_valence in ("positive", "neutral")
+AND valence_match == False
+→ primary_source = "english_translated"
+```
 
 ---
 
-## Training Data
-
-### Hindi — EmoInHindi (LREC)
-
-| Property | Detail |
-|---|---|
-| **Default file** | `data/EmoInHindi/LREC_EmoInHindi_reduced.csv` |
-| **Format** | Dialogue CSV (`dialogueId`, `utterance_no`, `authorRole`, `utterance`, `emotions`, `emoIntensity`) |
-| **Filter** | Only `authorRole == "user"` rows |
-| **Emotion vocab** | Dynamically built from unique labels in the `emotions` column |
-| **Intensity scale** | Raw 0–3, normalized to 0–1 by dividing by `max_intensity=3.0` |
-| **Split** | 80% train / 10% val / 10% test |
-| **Multi-file** | Pass a directory; all `*.csv` files are combined |
-
-Polarity is derived per sample as an intensity-weighted average of each emotion's signed polarity (joy/hope → +1, anger/sadness/fear → −1, surprise/neutral → 0).
-
-### English — GoEmotions (Google Research)
-
-| Property | Detail |
-|---|---|
-| **Source** | `google-research-datasets/go_emotions` via HuggingFace `datasets` |
-| **Size** | ~58,000 Reddit comments |
-| **Emotions** | 27 fine-grained labels (model head size matches dataset vocabulary) |
-| **Split** | Official HuggingFace train/validation/test |
-
----
-
-## Output Schema
-
-Every analysis returns a unified document:
+## Output JSON Schema
 
 ```json
 {
   "overall_sentiment": {
-    "emotions": { "anger": 0.12, "joy": 0.64, "sadness": 0.08, "fear": 0.03, "surprise": 0.10, "disgust": 0.02, "neutral": 0.01 },
+    "emotions": {
+      "anger": 0.12,
+      "joy": 0.64,
+      "sadness": 0.08,
+      "fear": 0.03,
+      "surprise": 0.10,
+      "disgust": 0.02,
+      "neutral": 0.01
+    },
     "dominant_emotion": "joy",
     "polarity_score": 0.71,
     "polarity_description": "Positive",
     "intensity": 0.78,
     "intensity_description": "Strong",
     "confidence": 0.89,
-    "num_segments": 4,
+    "num_segments": 3,
     "cross_check_summary": {
       "strategy_used": "agreement_flag",
-      "num_segments": 4,
+      "num_segments": 3,
       "num_agree": 3,
-      "num_disagree": 1,
-      "agreement_rate": 0.75
+      "num_disagree": 0,
+      "agreement_rate": 1.0
     }
   },
   "metadata": {
     "language": "hi",
-    "language_confidence": 0.98,
-    "original_length": 1240,
-    "cleaned_length": 1188,
-    "num_segments": 4,
+    "language_confidence": 0.9999,
+    "original_length": 349,
+    "cleaned_length": 345,
+    "num_segments": 3,
     "segment_strategy": "sentence"
   },
   "segments": [
     {
       "segment_id": "doc_001_seg_000",
-      "text_span": "char_span: 0-312",
+      "text_span": "char_span: 0-120",
       "sentiment": {
         "label": "joy",
-        "polarity_score": 0.82,
-        "intensity": 0.74,
+        "polarity_score": 0.75,
+        "intensity": 0.82,
         "confidence": 0.91
       },
       "emotion_tags": ["joy", "surprise"],
       "language_detected": "hi",
       "translation_used": true,
       "cross_check": {
-        "hindi_direct": { "label": "joy", "polarity_score": 0.80, "intensity": 0.73, "confidence": 0.90 },
-        "english_translated": { "label": "joy", "polarity_score": 0.84, "intensity": 0.75, "confidence": 0.89 },
+        "hindi_direct": {
+          "label": "joy",
+          "polarity_score": 0.73,
+          "intensity": 0.80,
+          "confidence": 0.90
+        },
+        "english_translated": {
+          "label": "joy",
+          "polarity_score": 0.77,
+          "intensity": 0.84,
+          "confidence": 0.88
+        },
+        "translated_text": "The film was excellent and I loved every moment of it.",
         "agreement": true,
+        "agreement_detail": {
+          "exact_label_match": true,
+          "valence_match": true,
+          "polarity_diff": 0.04,
+          "polarity_proximate": true,
+          "polarity_threshold_used": 0.2,
+          "secondary_confidence": 0.88,
+          "low_confidence_gate": 0.5
+        },
         "strategy_used": "agreement_flag",
         "primary_source": "hindi_direct"
       }
@@ -303,68 +281,81 @@ Every analysis returns a unified document:
 }
 ```
 
+**`polarity_description` values:** Highly negative | Negative | Neutral | Positive | Highly positive  
+**`intensity_description` values:** Very weak | Weak | Moderate | Strong | Very strong  
+**`summarizer_status` values:** `active` | `disabled`
+
 ---
 
 ## Project Structure
 
 ```
 backend/
-├── config.py                     # Model, training, inference, API, translation config
-├── main.py                       # CLI entry point (sentiment + summary)
-├── train.py                      # Hindi model training CLI
-├── train_en.py                   # English model training CLI
+├── server.py                     ← FastAPI app + CORS + lifespan
+├── main.py                       ← CLI entry point
+├── config.py                     ← ModelConfig, TrainingConfig, InferenceConfig,
+│                                    TranslationConfig, APIConfig
+├── train.py                      ← Hindi MultiTaskSentimentModel training CLI
+├── train_en.py                   ← English model training CLI
 ├── requirements.txt
 │
 ├── models/
-│   ├── sentiment_model.py        # MultiTaskSentimentModel (encoder + 3 heads)
-│   └── model_utils.py            # AutoSequenceClassifierWrapper, ModelTokenizer, load_model()
-│
-├── data/
-│   ├── dataset.py                # HindiSentimentCSVDataset
-│   ├── dataset_en.py             # GoEmotionsDataset
-│   ├── dataloader.py             # Hindi data loaders
-│   ├── dataloader_en.py          # English data loaders
-│   ├── total-emotion-splitter.py # Utility to extract unique emotions from CSV
-│   └── EmoInHindi/               # Hindi training data (not in git)
-│
-├── training/
-│   ├── trainer.py                # Training loop, eval, checkpointing, early stopping
-│   ├── losses.py                 # MultiTaskLoss
-│   └── metrics.py                # F1, MSE, Pearson correlation
+│   ├── sentiment_model.py        ← MultiTaskSentimentModel
+│   │                               (EmotionHead, PolarityHead, IntensityHead)
+│   └── model_utils.py            ← AutoSequenceClassifierWrapper
+│                                    ModelTokenizer, load_model()
 │
 ├── inference/
-│   ├── pipeline.py               # SentimentInferencePipeline + RealTimeInference
-│   ├── pipeline_en.py            # English standalone pipeline
-│   ├── segmentation.py           # DocumentSegmenter
-│   ├── comparator.py             # ResultComparator
-│   └── output_assembler.py       # OutputAssembler
+│   ├── pipeline.py               ← SentimentInferencePipeline
+│   │                               RealTimeInference
+│   │                               adapt_sentiment_output_to_summarizer()
+│   ├── pipeline_en.py            ← SentimentInferencePipelineEN
+│   ├── comparator.py             ← ResultComparator (reconcile, summarize)
+│   ├── output_assembler.py       ← OutputAssembler (aggregate, format)
+│   └── segmentation.py           ← DocumentSegmenter (Hindi/English)
 │
 ├── multilingual_summarizer/
-│   ├── summarizer.py             # BilingualSummarizer (Llama-3.2-3B)
-│   └── config.py                 # Summarizer prompts, generation params
+│   ├── summarizer.py             ← BilingualSummarizer (Llama-3.2-3B)
+│   └── config.py                 ← Prompt templates, generation params
 │
 ├── utils/
-│   ├── preprocessing.py          # HindiPreprocessor, LanguageDetector, PolarityPivotAdjuster
-│   ├── preprocessing_en.py       # English preprocessing
-│   ├── tokenizer.py                # HindiWordTokenizer (Indic-NLP)
-│   ├── translator.py               # HindiToEnglishTranslator (MarianMT)
-│   └── logger.py                   # Centralized logging
+│   ├── preprocessing.py          ← HindiPreprocessor, LanguageDetector,
+│   │                               PolarityPivotAdjuster
+│   ├── preprocessing_en.py       ← EnglishPreprocessor
+│   ├── translator.py             ← HindiToEnglishTranslator (MarianMT)
+│   ├── tokenizer.py              ← HindiWordTokenizer (Indic-NLP)
+│   └── logger.py                 ← setup_logger(), get_logger()
 │
 ├── api/
-│   ├── routes.py                   # FastAPI endpoints
-│   ├── schemas.py                  # Pydantic request/response models
-│   └── middleware.py               # Request logging, timing, size limits
+│   ├── routes.py                 ← All FastAPI endpoints
+│   ├── schemas.py                ← Pydantic models (request/response)
+│   └── middleware.py             ← Request logging, timing, size limits
 │
-├── EngModel/                       # Standalone English training utilities
+├── data/
+│   ├── dataset.py                ← HindiSentimentCSVDataset (EmoInHindi)
+│   ├── dataset_en.py             ← GoEmotionsDataset
+│   ├── dataloader.py             ← Hindi data loaders
+│   └── dataloader_en.py          ← English data loaders
+│
+├── training/
+│   ├── trainer.py                ← Training loop, eval, checkpointing,
+│   │                               early stopping, custom Trainer class
+│   ├── losses.py                 ← MultiTaskLoss
+│   └── metrics.py                ← F1, MSE, Pearson correlation
+│
+├── EngModel/                     ← Standalone English training utilities
 │   ├── train.py
 │   ├── data_processing.py
 │   ├── clean-data.py
 │   └── train-test-split.py
 │
-├── checkpoints/                  # Model checkpoints (gitignored)
-│   ├── best_model.pt
-│   └── en/best_model.pt
+├── checkpoints/                  ← Model weights (gitignored)
+│   ├── best_model.pt             ← Hindi model checkpoint
+│   └── en/best_model.pt          ← English model checkpoint (optional)
+│
 └── logs/
+    ├── app.log                   ← Server logs with ms-precision timestamps
+    └── server.out                ← Process stdout/stderr
 ```
 
 ---
@@ -374,23 +365,22 @@ backend/
 ### Prerequisites
 
 - Python 3.8+
-- CUDA 11.8+ (optional, recommended for inference and summarization)
+- CUDA 11.8+ with ≥ 4 GB VRAM (recommended; CPU-only is supported but slow)
 - HuggingFace account + token (for Llama summarizer)
-- Pre-downloaded model weights in local HuggingFace cache
 
 ### Setup
 
 ```bash
 cd backend
 python -m venv venv
-source venv/bin/activate       # Windows: venv\Scripts\activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 python -c "import nltk; nltk.download('punkt')"
 ```
 
 ### Environment Variables
 
-Create `.env` in `backend/`:
+Create `backend/.env`:
 
 ```env
 HF_TOKEN=your_huggingface_token
@@ -403,86 +393,172 @@ API_WORKERS=4
 
 ### Pre-download Models
 
-Inference uses `local_files_only=True`. Download models before first run:
+Models load from the local HuggingFace cache (`local_files_only=True`). Download before first run:
 
 ```python
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM
 
 for name in [
-    "vashuag/HindiEmotion",
     "j-hartmann/emotion-english-distilroberta-base",
     "Helsinki-NLP/opus-mt-hi-en",
+    "distilbert-base-multilingual-cased",
 ]:
     AutoTokenizer.from_pretrained(name)
     AutoModelForSequenceClassification.from_pretrained(name)
 ```
 
-For summarization, also cache `meta-llama/Llama-3.2-3B-Instruct` with your `HF_TOKEN`.
+For summarization, also cache Llama (requires HF_TOKEN with Llama access):
+```bash
+huggingface-cli login
+python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.2-3B-Instruct')"
+```
+
+---
+
+## Running the Server
+
+```bash
+cd backend
+python server.py
+# or: uvicorn server:app --host 0.0.0.0 --port 8000
+
+# Run in background (production-style):
+nohup python server.py > logs/server.out 2>&1 &
+```
+
+Interactive docs: `http://localhost:8000/docs`  
+Health check: `http://localhost:8000/api/v1/health`
+
+The server loads all models **once at startup** and keeps them resident in memory for the lifetime of the process. Inference calls route through `run_in_threadpool` to avoid blocking FastAPI's async event loop.
 
 ---
 
 ## CLI Usage
 
-`main.py` is the command-line entry point. It loads all models (sentiment, translator, summarizer) and prints a summary.
-
 ```bash
 cd backend
 
-# Analyze a text file
-python main.py --file test-input_hindi.txt
+# Analyze a text file (auto language detection)
+python main.py --file document.txt
 
 # Analyze inline text
 python main.py --text "यह फिल्म बहुत अच्छी है!"
 
 # Force language
-python main.py --file test-input_english.txt --language en
+python main.py --file report.txt --language en
+
+# Control summary length
+python main.py --file report.txt --length short
+python main.py --file report.txt --length long
 ```
 
-| Flag | Description |
-|---|---|
-| `--file`, `-f` | Path to a `.txt` file |
-| `--text`, `-t` | Text string to analyze |
-| `--language`, `-l` | Force language: `hi` or `en` |
-| `--length` | Summary length hint: `short`, `medium` (default), `long` |
+| Flag | Short | Description |
+|---|---|---|
+| `--file` | `-f` | Path to a `.txt` file |
+| `--text` | `-t` | Inline text string |
+| `--language` | `-l` | Force: `hi` or `en` |
+| `--length` | | Summary length hint: `short` / `medium` / `long` |
 
-Example output:
+---
 
+## REST API Reference
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/analyze` | Analyze + optional segments + optional summary |
+| `POST` | `/api/v1/analyze_detailed` | Always includes per-segment breakdown |
+| `POST` | `/api/v1/analyze_json` | Raw JSON — same as `analyze_detailed` |
+| `POST` | `/api/v1/batch_analyze` | Batch up to 100 texts |
+| `POST` | `/api/v1/analyze_stream` | SSE stream for long documents |
+| `POST` | `/api/v1/speak` | Edge-TTS text-to-speech |
+| `GET` | `/api/v1/emotions` | Supported emotion labels |
+| `GET` | `/api/v1/stats` | Model + API statistics |
+
+### Request Body (`/analyze`)
+
+```json
+{
+  "text": "your text here",
+  "language": "hi",
+  "return_segments": true,
+  "summarize": false
+}
 ```
-[~] Reading input...
-[~] Loading all models...
-[~] Running sentiment analysis...
 
-==================================================
-ANALYSIS SUMMARY
-==================================================
-Language: hi
-Dominant Emotion: joy
-Polarity: Positive
+`language` accepts: `"hi"`, `"en"`, `"auto"`, `""`, `null` (all auto-detect).  
+`summarize: true` adds ~20-40 seconds latency for the Llama model.
 
------------------------SUMMARY-----------------------
-The text conveys a strongly positive tone...
-==================================================
+### cURL Example
+
+```bash
+# Quick analysis (no summary)
+curl -X POST http://localhost:8000/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "यह फिल्म बहुत अच्छी थी।", "summarize": false}'
+
+# With segments and summary
+curl -X POST http://localhost:8000/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "...", "return_segments": true, "summarize": true}'
 ```
 
 ---
 
-## Training
+## Python API
+
+```python
+from inference.pipeline import SentimentInferencePipeline, RealTimeInference
+
+# Full pipeline
+pipeline = SentimentInferencePipeline(
+    model_path="checkpoints/best_model.pt",          # Hindi model
+    english_model_path=None,                          # auto-resolves j-hartmann
+    comparison_strategy="agreement_flag",             # or "confidence_weighted_pick" / "average"
+)
+
+result = pipeline.process_document(
+    text="मुझे यह फिल्म बहुत पसंद है।",
+    return_segments=True,
+    segment_id="doc_001",
+    language="hi",
+    summarize=False,
+)
+
+print(result["overall_sentiment"]["dominant_emotion"])
+print(result["overall_sentiment"]["polarity_score"])
+print(result["segments"][0]["cross_check"]["primary_source"])
+print(result["segments"][0]["cross_check"]["translated_text"])
+
+# Lightweight wrapper (used by API)
+inference = RealTimeInference()
+result = inference.predict("I love this product!", language="en")
+results = inference.predict_batch(["text one", "text two"])
+```
+
+---
+
+## Training Guide
 
 ### Train the Hindi Model
 
 ```bash
+# Basic training
 python train.py train data/EmoInHindi/LREC_EmoInHindi_reduced.csv
 
+# Full options
 python train.py train data/EmoInHindi/LREC_EmoInHindi_reduced.csv \
-    --epochs 20 --batch-size 16 --lr 2e-5 --output-dir ./checkpoints
+    --epochs 20 \
+    --batch-size 16 \
+    --lr 2e-5 \
+    --output-dir ./checkpoints
 
-python train.py evaluate data/EmoInHindi/LREC_EmoInHindi_reduced.csv checkpoints/best_model.pt
-```
-To Continue Training (Fine-tune from previous best)
-Use the --checkpoint flag to resume from your saved model:
+# Resume from checkpoint
+python train.py train data/EmoInHindi/ --checkpoint checkpoints/best_model.pt
 
-```bash
-python train.py train --checkpoint checkpoints/best_model.pt
+# Evaluate
+python train.py evaluate data/EmoInHindi/ checkpoints/best_model.pt
 ```
 
 ### Train the English Model
@@ -494,168 +570,86 @@ python train_en.py --epochs 10 --batch-size 32 --output-dir checkpoints/en
 
 GoEmotions is downloaded automatically from HuggingFace on first run.
 
+### Training Data
+
+| Language | Dataset | Size | Format |
+|---|---|---|---|
+| **Hindi** | EmoInHindi (LREC) | ~7,000 utterances | CSV: `utterance`, `emotions`, `emoIntensity` |
+| **English** | GoEmotions (Google) | ~58,000 comments | HuggingFace `datasets`, 27 labels |
+
 ### Checkpoint Format
 
 ```python
 {
-    "model_state_dict": ...,
+    "model_state_dict": ...,       # PyTorch state dict
     "emotion_labels": ["anger", "joy", ...],
     "num_emotions": N,
     "model_name": "distilbert-base-multilingual-cased"
 }
 ```
 
-Each epoch saves `checkpoints/checkpoint_epoch_{N}.pt`. The best validation-loss epoch writes `checkpoints/best_model.pt`.
-
----
-
-## REST API
-
-API routes are defined in `api/routes.py` with Pydantic schemas in `api/schemas.py` and middleware in `api/middleware.py`.
-
-To start a server, create a small app module (e.g. `server.py`) in `backend/`:
-
-```python
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from api.routes import router
-from api.middleware import configure_api_middleware
-from config import APIConfig
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-
-
-app = FastAPI(title="Multilingual Sentiment Analysis", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-configure_api_middleware(app)
-app.include_router(router)
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host=APIConfig.HOST, port=APIConfig.PORT, reload=APIConfig.RELOAD)
-```
-
-```bash
-cd backend
-python server.py
-# or: uvicorn server:app --host 0.0.0.0 --port 8000
-```
-
-Interactive docs: `http://localhost:8000/docs`
-
-### Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/v1/health` | Health check |
-| `POST` | `/api/v1/analyze` | Aggregate sentiment + metadata + summary |
-| `POST` | `/api/v1/analyze_detailed` | Full output with per-segment breakdown |
-| `POST` | `/api/v1/analyze_json` | Same as `analyze_detailed` |
-| `POST` | `/api/v1/batch_analyze` | Batch of up to 100 texts |
-| `POST` | `/api/v1/analyze_stream` | Server-Sent Events for long documents |
-| `GET` | `/api/v1/emotions` | Supported emotion labels |
-| `GET` | `/api/v1/stats` | Model and API statistics |
-
-#### Example
-
-```bash
-curl -X POST http://localhost:8000/api/v1/analyze_json \
-  -H "Content-Type: application/json" \
-  -d '{"text": "यह फिल्म बहुत अच्छी है!"}'
-```
-
----
-
-## Python API
-
-```python
-from inference.pipeline import SentimentInferencePipeline, RealTimeInference
-
-# Full pipeline with optional custom checkpoints
-pipeline = SentimentInferencePipeline(
-    model_path="checkpoints/best_model.pt",
-    english_model_path="checkpoints/en/best_model.pt",
-    comparison_strategy="agreement_flag",
-)
-
-result = pipeline.process_document(
-    text="मुझे यह फिल्म बहुत पसंद है।",
-    return_segments=True,
-    segment_id="doc_001",
-)
-
-print(result["overall_sentiment"]["dominant_emotion"])
-print(result["summary"])
-print(result["summarizer_status"])
-
-# Lightweight wrapper (used by API routes)
-inference = RealTimeInference()
-result = inference.predict("यह एक परीक्षण वाक्य है।")
-results = inference.predict_batch(["text 1", "text 2"])
-```
+Best-val-loss checkpoint → `checkpoints/best_model.pt`  
+Per-epoch → `checkpoints/checkpoint_epoch_{N}.pt`
 
 ---
 
 ## Configuration Reference
 
-| Config Class | Key | Default | Description |
+| Class | Key | Default | Description |
 |---|---|---|---|
-| `ModelConfig` | `MODEL_NAME` | `distilbert-base-multilingual-cased` | Hindi training encoder |
+| `ModelConfig` | `MODEL_NAME` | `distilbert-base-multilingual-cased` | Hindi encoder |
 | `ModelConfigEN` | `MODEL_NAME` | `bert-base-uncased` | English training encoder |
-| `ModelConfig` | `MAX_SEQUENCE_LENGTH` | `512` | Max subword tokens |
+| `ModelConfig` | `MAX_SEQUENCE_LENGTH` | `512` | Token limit |
+| `ModelConfig` | `DROPOUT_RATE` | `0.1` | Dropout across all heads |
 | `InferenceConfig` | `SEGMENTATION_STRATEGY` | `"sentence"` | `sentence` / `paragraph` / `fixed_length` |
 | `InferenceConfig` | `BATCH_SIZE` | `32` | Inference batch size |
-| `TranslationConfig` | `MODEL_NAME` | `Helsinki-NLP/opus-mt-hi-en` | MarianMT model |
+| `InferenceConfig` | `CONFIDENCE_THRESHOLD` | `0.6` | Ambiguity gate threshold |
+| `TranslationConfig` | `MODEL_NAME` | `Helsinki-NLP/opus-mt-hi-en` | MarianMT translation model |
 | `TranslationConfig` | `DEVICE` | `"cpu"` | Translation device |
-| `APIConfig` | `MAX_TEXT_LENGTH` | `50000` | Max request text length (chars) |
+| `APIConfig` | `MAX_TEXT_LENGTH` | `50000` | Max request chars |
 | `TrainingConfig` | `BATCH_SIZE` | `1` | Training batch size |
 | `TrainingConfig` | `PATIENCE` | `3` | Early stopping patience |
+| `TrainingConfig` | `EMOTION_LOSS_WEIGHT` | `5.0` | BCE weight in multi-task loss |
 
 ---
 
 ## Troubleshooting
 
-### Models not found (`local_files_only=True`)
-
-Pre-download HuggingFace models to your cache. See [Pre-download Models](#pre-download-models).
-
-### `HF_TOKEN` / summarizer disabled
-
-The summarizer requires a valid HuggingFace token with Llama access and a locally cached model. Sentiment analysis works without it.
-
 ### CUDA out of memory
-
 ```bash
+# Kill all processes using GPU
 nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -I {} kill -9 {}
+
+# Or set CUDA_VISIBLE_DEVICES="" to force CPU
+CUDA_VISIBLE_DEVICES="" python server.py
 ```
 
-Reduce `TrainingConfig.BATCH_SIZE` and `InferenceConfig.BATCH_SIZE` in `config.py`.
+The English cross-check model already runs on CPU by design to protect VRAM for the Hindi model + Llama summarizer. If you have more than 6 GB VRAM, you can set `english_device = "cuda"` in `pipeline.py`.
 
-### Slow inference on CPU
+### Models not found (local_files_only error)
+Pre-download models to the HuggingFace cache before first run. See [Pre-download Models](#pre-download-models).
 
-- Translation runs on CPU by default and is the main bottleneck for Hindi inputs.
-- Set `TRANSLATION_DEVICE=cuda` if GPU memory allows.
-- Increase `InferenceConfig.BATCH_SIZE` to amortize tokenization.
+### Summarizer disabled
+Set `HF_TOKEN` in `backend/.env` and ensure `meta-llama/Llama-3.2-3B-Instruct` is cached locally. Sentiment analysis works without the summarizer — `summarizer_status` will be `"disabled"`.
 
-### `indic-nlp-library` not installed
+### Slow inference
+- Translation is the biggest bottleneck for Hindi inputs (~1-2s on CPU).
+- Set `TRANSLATION_DEVICE=cuda` if VRAM headroom allows.
+- Use `summarize=false` for fast responses (skips ~20-40s Llama inference).
 
-```bash
-pip install indic-nlp-library
-```
+### Hindi positive text showing as "neutral"
+The Helsinki-NLP translator produces imperfect English for complex Hindi text, causing the English cross-check model to return neutral. The Hindi override rule prevents the worst-case outcome (disgusted/angry classification), but the ideal fix is **retraining the Hindi model** on a larger, more diverse dataset.
 
-Optional but recommended for Hindi Unicode normalization. The system falls back gracefully without it.
-
-### Clear `__pycache__`
-
+### Clear Python cache
 ```bash
 find . -type d -name "__pycache__" -exec rm -rf {} +
 ```
+
+### indic-nlp-library not installed
+```bash
+pip install indic-nlp-library
+```
+Optional but recommended for Hindi Unicode normalization. The system falls back gracefully without it.
 
 ---
 
@@ -663,8 +657,4 @@ find . -type d -name "__pycache__" -exec rm -rf {} +
 
 MIT License — see [LICENSE](../LICENSE).
 
-**Version:** 1.1.0 · **Last Updated:** July 2026
-
-If cuda cache full do this : nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -I {} kill -9 {}
-
-to clear the __Pycache__ : find . -type d -name "__pycache__" -exec rm -rf {} +
+**Version:** 2.0.0 · **Last Updated:** July 2026
