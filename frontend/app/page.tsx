@@ -550,7 +550,7 @@ export default function TextPulseApp() {
       </header>
 
       {/* MAIN CONTENT AREA */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-3 flex flex-col min-h-0 relative z-10 pb-20">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-3 flex flex-col min-h-0 relative z-10 pb-40">
         {!hasSubmitted ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center my-auto space-y-3 py-12 animate-in fade-in duration-500 overflow-y-auto">
             <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-purple-900 drop-shadow-sm">
@@ -600,7 +600,7 @@ export default function TextPulseApp() {
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-0 flex-1 items-start pb-20">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-0 flex-1 items-start pb-8">
                 {/* LEFT COLUMN: Executive Summary Box (Reduced bottom margin / height to prevent overlap) */}
                 <div className="lg:col-span-6 bg-white/85 border border-purple-200 p-4 sm:p-5 rounded-2xl flex flex-col text-slate-800 shadow-xl backdrop-blur-xl h-full max-h-[calc(100vh-230px)] mb-2">
                   <div className="flex items-center justify-between pb-2.5 border-b border-purple-100 shrink-0">

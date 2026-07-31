@@ -8,7 +8,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "TextPulse - Multilingual Sentiment Analysis & Emotion Insights",
+  title: "तत्त्वा Multilingual Sentiment Analysis and Summarizer",
   description: "AI-powered document sentiment analysis, emotion breakdown, and executive summary platform.",
 };
 
