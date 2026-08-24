@@ -7,10 +7,13 @@ Dataset class for Hindi sentiment analysis, loaded from dialogue-style CSV files
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
+import numpy as np
 import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 from sklearn.model_selection import train_test_split
+from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
+
 
 from config import DataConfig, TrainingConfig
 from models.model_utils import ModelTokenizer
@@ -57,6 +60,16 @@ DEFAULT_EMOTION_POLARITY = {
     "serious": 0.0,
     "serenity": 0.7,
     "wisdom": 0.5,
+
+    # Missing spectrum & remapped categories
+    "hopeful": 0.7,
+    "annoyed": -0.6,
+    "apprehensive": -0.5,
+    "surprised": 0.0,
+    "grateful": 0.9,
+    "impressed": 0.8,
+    "confused": -0.2,
+    "guilty": -0.7,
 }
 
 EMOTION_REMAPPING = {
@@ -296,13 +309,34 @@ class HindiSentimentCSVDataset(Dataset):
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         train_ratio, val_ratio, test_ratio = split_ratio
 
-        train_data, temp_data = train_test_split(
-            data, test_size=1 - train_ratio, random_state=seed
+        # Convert emotion labels into a 2D binary numpy matrix for multilabel stratification
+        y = np.array([
+            (sample["emotion_labels"].numpy() if torch.is_tensor(sample["emotion_labels"])
+             else np.array(sample["emotion_labels"])) > 0
+            for sample in data
+        ], dtype=int)
+
+        # Split train vs temp (val + test)
+        msss1 = MultilabelStratifiedShuffleSplit(
+            n_splits=1, test_size=1.0 - train_ratio, random_state=seed
         )
+        train_idx, temp_idx = next(msss1.split(np.zeros(len(data)), y))
+
+        # Split temp into val vs test
         val_test_split = val_ratio / (val_ratio + test_ratio)
-        val_data, test_data = train_test_split(
-            temp_data, test_size=1 - val_test_split, random_state=seed
+        y_temp = y[temp_idx]
+        msss2 = MultilabelStratifiedShuffleSplit(
+            n_splits=1, test_size=1.0 - val_test_split, random_state=seed
         )
+        val_sub_idx, test_sub_idx = next(msss2.split(np.zeros(len(temp_idx)), y_temp))
+
+        val_idx = [temp_idx[i] for i in val_sub_idx]
+        test_idx = [temp_idx[i] for i in test_sub_idx]
+
+        train_data = [data[i] for i in train_idx]
+        val_data = [data[i] for i in val_idx]
+        test_data = [data[i] for i in test_idx]
+
         return train_data, val_data, test_data
 
     def __len__(self) -> int:

@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from datetime import datetime
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR, SequentialLR, ConstantLR
+from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
 from torch.utils.data import DataLoader
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -100,7 +100,7 @@ class Trainer:
             weight_decay=TrainingConfig.WEIGHT_DECAY,
         )
 
-        # Scheduler: linear warmup → constant LR
+        # Scheduler: linear warmup → CosineAnnealingLR decay
         warmup_steps = TrainingConfig.WARMUP_STEPS
         total_steps = len(train_loader) * TrainingConfig.NUM_EPOCHS
         warmup_steps = min(warmup_steps, total_steps)
@@ -111,10 +111,15 @@ class Trainer:
             end_factor=1.0,
             total_iters=warmup_steps,
         )
-        constant_scheduler = ConstantLR(self.optimizer, factor=1.0, total_iters=total_steps)
+        decay_steps = max(1, total_steps - warmup_steps)
+        cosine_scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=decay_steps,
+            eta_min=TrainingConfig.LEARNING_RATE * 0.05,
+        )
         self.scheduler = SequentialLR(
             self.optimizer,
-            schedulers=[warmup_scheduler, constant_scheduler],
+            schedulers=[warmup_scheduler, cosine_scheduler],
             milestones=[warmup_steps],
         )
 
@@ -176,20 +181,20 @@ class Trainer:
         pos_weight = num_negatives / (num_positives + 1e-8)  # +1e-8 to avoid div by zero
         
         # Clamp to avoid extreme values
-        pos_weight = torch.clamp(pos_weight, min=1.0, max=25.0)
+        pos_weight = torch.clamp(pos_weight, min=1.0, max=10.0)
 
         self._pos_weight = pos_weight
         
-        # Lower global scaling to protect high-density fields (neutral, compassion)
+        # Lower global scaling ceiling to 3.0x to protect high-density fields
         if avg_density < 0.05:
-            self._emotion_weight_boost = 5.0
-            logger.info(f"🔴 VERY SPARSE LABELS (<5%) → emotion_weight_boost = 5.0x")
-        elif avg_density < 0.10:
-            self._emotion_weight_boost = 4.0
-            logger.info(f"🟠 SPARSE LABELS (<10%) → emotion_weight_boost = 4.0x")
-        elif avg_density < 0.20:
             self._emotion_weight_boost = 3.0
-            logger.info(f"🟡 MODERATE SPARSITY (<20%) → emotion_weight_boost = 3.0x")
+            logger.info(f"🔴 VERY SPARSE LABELS (<5%) → emotion_weight_boost = 3.0x")
+        elif avg_density < 0.10:
+            self._emotion_weight_boost = 2.5
+            logger.info(f"🟠 SPARSE LABELS (<10%) → emotion_weight_boost = 2.5x")
+        elif avg_density < 0.20:
+            self._emotion_weight_boost = 2.0
+            logger.info(f"🟡 MODERATE SPARSITY (<20%) → emotion_weight_boost = 2.0x")
         else:
             self._emotion_weight_boost = 1.5
             logger.info(f"🟢 REASONABLE LABEL DISTRIBUTION → emotion_weight_boost = 1.5x")
@@ -453,7 +458,10 @@ class Trainer:
         logger.info(f"  Metrics logged → {self._metrics_log_path}  (epoch {epoch})")
 
     def save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
-        """Save model checkpoint to disk."""
+        """Save model checkpoint to disk (saves best_model.pt when is_best=True)."""
+        if not is_best:
+            return
+
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
@@ -466,14 +474,9 @@ class Trainer:
             "best_val_f1": self.best_val_f1,
         }
 
-        epoch_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
-        torch.save(checkpoint, epoch_path)
-        logger.info(f"  Checkpoint saved → {epoch_path}")
-
-        if is_best:
-            best_path = self.checkpoint_dir / "best_model.pt"
-            torch.save(checkpoint, best_path)
-            logger.info(f"  ★ New best model saved → {best_path}")
+        best_path = self.checkpoint_dir / "best_model.pt"
+        torch.save(checkpoint, best_path)
+        logger.info(f"  ★ New best model saved → {best_path} (epoch {epoch})")
 
     def train(self, num_epochs: Optional[int] = None) -> None:
         """

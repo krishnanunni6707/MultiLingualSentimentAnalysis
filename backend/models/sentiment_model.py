@@ -159,38 +159,9 @@ class MultiTaskSentimentModel(nn.Module):
 
         # Pass through raw trained task heads
         emotion_logits = self.emotion_head(pooled_output)
+        emotion_probs = torch.sigmoid(emotion_logits)
         polarity_scores = self.polarity_head(pooled_output)
         intensity_scores = self.intensity_head(pooled_output)
-        
-        # --- CONTEXT-AWARE BALANCE GATE ---
-        emotion_probs = torch.sigmoid(emotion_logits)
-        
-        # Determine positive emotion indices dynamically
-        pos_indices = []
-        if hasattr(self, "id2label") and self.id2label:
-            for idx, label in self.id2label.items():
-                if label.lower() in ("joy", "joyful", "happy", "happiness", "love", "optimism", "positive", "hopeful", "confident", "grateful", "compassion", "impressed"):
-                    pos_indices.append(idx)
-        else:
-            # Fallback to standard 6-class indices: joy (1)
-            pos_indices = [1]
-            
-        if pos_indices and emotion_probs.shape[-1] > max(pos_indices):
-            # Take the max probability across all positive emotions
-            positive_signal = torch.max(emotion_probs[:, pos_indices], dim=-1, keepdim=True)[0]
-        else:
-            positive_signal = torch.zeros_like(polarity_scores)
-            
-        # Determine threshold based on number of emotion classes
-        num_classes = emotion_probs.shape[-1]
-        uniform_prob = 1.0 / max(num_classes, 1)
-        gate_threshold = min(0.35, 2.5 * uniform_prob)
-        
-        # Smoothly pull the polarity toward positive if a strong positive emotion is present
-        # This completely neutralizes keyword poisoning from words like "darkness" or "failure"
-        uplift_mask = (positive_signal > gate_threshold).float()
-        polarity_scores = (1.0 - uplift_mask) * polarity_scores + uplift_mask * torch.clamp(polarity_scores + (positive_signal * 0.8), -1.0, 1.0)
-        # ----------------------------------
 
         return {
             "emotion_logits": emotion_logits,
