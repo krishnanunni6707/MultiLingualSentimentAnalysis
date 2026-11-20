@@ -309,20 +309,36 @@ class SentimentInferencePipeline:
         summary = None
         if summarize and self.summarizer_pipeline is not None:
             t_sum = time.perf_counter()
-            logger.info("⏳ Starting Llama-3.2 text summarization step...")
+            logger.info("⏳ Starting Gemini text summarization step...")
             try:
                 adapted_json = adapt_sentiment_output_to_summarizer(full_result)
                 summary_data = self.summarizer_pipeline.summarize(
                     text=text,
                     language=lang,
+                    summary_length="long",
                     sentiment_data=adapted_json
                 )
                 summary = summary_data.get("summary")
-                logger.info(f"📝 Llama-3.2 text summarization completed in {(time.perf_counter() - t_sum):.3f}s")
+                logger.info(f"📝 Gemini text summarization completed in {(time.perf_counter() - t_sum):.3f}s")
             except Exception as e:
                 logger.error("Error during summarization : %s", e)
+                overall = full_result.get("overall_sentiment", {})
+                emotion = overall.get("dominant_emotion", "neutral")
+                polarity = overall.get("polarity_description", "neutral")
+                intensity = overall.get("intensity_description", "moderate")
+                if lang == "hi":
+                    summary = (
+                        f"इस पाठ का प्रमुख भाव {emotion} है। "
+                        f"समग्र भावना {polarity} और तीव्रता {intensity} है।"
+                    )
+                else:
+                    summary = (
+                        f"The text has an overall {polarity} sentiment with "
+                        f"{intensity} intensity, primarily expressing {emotion}."
+                    )
+                logger.warning("Using local sentiment summary fallback after Gemini failure")
         elif not summarize:
-            logger.info("⏩ Llama-3.2 text summarization skipped (summarize=False)")
+            logger.info("⏩ Gemini text summarization skipped (summarize=False)")
 
         full_result["summary"]           = summary
         full_result["summarizer_status"] = self.summarizer_status

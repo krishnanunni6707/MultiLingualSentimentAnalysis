@@ -92,6 +92,12 @@ def setup_logger(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
+        # Flush after every log message so the file updates in real-time
+        _orig_emit = file_handler.emit
+        def _flushing_emit(record, _emit=_orig_emit, _handler=file_handler):
+            _emit(record)
+            _handler.flush()
+        file_handler.emit = _flushing_emit
         root.addHandler(file_handler)
 
     _ROOT_CONFIGURED = True
